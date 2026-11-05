@@ -12,7 +12,7 @@ const MAX_BODY = 5 * 1024 * 1024;
 const SLOTS = ['CONSOL.', 'BREWHOUSE 1', 'BREWHOUSE 3', 'FERMENTHP', 'FERMENTAMSTELPRAY', 'BRIGHT BEER'];
 const KEY_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 // Sites que podem chamar esta função pelo navegador.
-const DEFAULT_ORIGINS = ['https://pabloconstant.github.io'];
+const DEFAULT_ORIGINS = ['https://ftr-beer-production.github.io'];
 
 type Env = (k: string) => string | undefined;
 
