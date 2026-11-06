@@ -1,12 +1,20 @@
 // @ts-nocheck -- funções puras copiadas do painel (JS); tipagem relaxada de propósito
 // Supabase Edge Function: painel-publish
 // URL: https://krscjbdphymgzjteclif.supabase.co/functions/v1/painel-publish
-// Publica uma importação validada do Painel FTR. A autorização é validada AQUI, no servidor:
+// Operações PROTEGIDAS do Painel FTR. A autorização é validada AQUI, no servidor, para todas:
 //   1) o token do usuário (Supabase Auth) é conferido no Supabase;
-//   2) o e-mail precisa estar confirmado e constar na tabela privada public.painel_publicadores.
+//   2) o e-mail precisa estar confirmado e constar na tabela privada public.painel_publicadores;
+//   3) a origem do navegador precisa estar em DEFAULT_ORIGINS (ou ALLOWED_ORIGINS).
+// Ações (campo "action" do corpo JSON; ausente = "publish", compatível com o painel antigo):
+//   publish  — publica um mês (painel_publish_v2: recusa conteúdo idêntico e conferência
+//              desatualizada via expectedRevision; sem a migration 001, usa painel_publish v1)
+//   restore  — recupera uma versão antiga como NOVA revisão (painel_restore_version)
+//   versions — lista o histórico de versões (metadados; sem os dados)
+//   version  — dados completos de uma versão, para prévia
+//   backup   — todas as versões completas + metadados, para backup
 // A gravação usa a chave secreta do próprio projeto (variável padrão das Edge Functions),
 // que nunca sai do Supabase. Implantar com verify_jwt = false: o login é conferido no código.
-// Lógica idêntica à antiga função do Netlify (netlify/functions/painel-publish.mjs).
+// Validação dos dados idêntica à antiga função do Netlify (netlify/functions/painel-publish.mjs).
 
 const MAX_BODY = 5 * 1024 * 1024;
 const SLOTS = ['CONSOL.', 'BREWHOUSE 1', 'BREWHOUSE 3', 'FERMENTHP', 'FERMENTAMSTELPRAY', 'BRIGHT BEER'];
@@ -193,7 +201,7 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return reply(502, { ok: false, error: 'Não foi possível conferir a autorização no banco.' });
   }
 
-  // 3) payload
+  // 3) payload (lido só depois da autenticação e da autorização)
   const len = Number(req.headers.get('content-length') || 0);
   if (len > MAX_BODY) return reply(413, { ok: false, error: 'Arquivo grande demais para publicar.' });
   let raw: string;
@@ -202,57 +210,157 @@ export async function handle(req: Request, env: Env): Promise<Response> {
   // deno-lint-ignore no-explicit-any
   let body: any;
   try { body = JSON.parse(raw); } catch (_e) { return reply(400, { ok: false, error: 'JSON inválido.' }); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return reply(400, { ok: false, error: 'Requisição inválida.' });
 
-  const { file, periodKey, checksum, dataJson } = body || {};
-  const setCurrent = body && body.setCurrent === false ? false : true;
-  if (typeof periodKey !== 'string' || !KEY_RE.test(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
-  if (typeof file !== 'string' || !file.trim() || file.length > 255 || /[\u0000-\u001f]/.test(file)) return reply(422, { ok: false, error: 'Nome de arquivo inválido.' });
-  if (typeof dataJson !== 'string' || typeof checksum !== 'string') return reply(422, { ok: false, error: 'Dados ausentes.' });
-  if (fnv(dataJson) !== checksum) return reply(422, { ok: false, error: 'Verificação de integridade falhou (checksum).' });
-
+  const action = body.action == null ? 'publish' : String(body.action);
+  const api = (path: string, init: RequestInit = {}) => fetch(SB + '/rest/v1/' + path, { ...init, headers: { ...adm, ...(init.headers || {}) } });
+  const expectedOf = (v: unknown) => (v == null ? null : Number.isInteger(v) && (v as number) >= 0 ? (v as number) : NaN);
+  const revOf = (v: unknown) => (Number.isInteger(v) && (v as number) >= 1 ? (v as number) : NaN);
+  const MIGRACAO = { ok: false, code: 'migracao_pendente', error: 'O histórico de versões ainda não foi ativado no banco (migration 001 pendente).' };
+  // Erros PTxxx das funções SQL chegam com o status HTTP xxx e { code, message, details }.
   // deno-lint-ignore no-explicit-any
-  let d: any;
-  try { d = JSON.parse(dataJson); } catch (_e) { return reply(422, { ok: false, error: 'Dados ilegíveis.' }); }
-  const errs = validatePayload(d, periodKey);
-  if (errs.length) return reply(422, { ok: false, error: 'A validação do servidor recusou os dados. A versão anterior foi preservada.', details: errs.slice(0, 20) });
-
-  // deno-lint-ignore no-explicit-any
-  let summary: any = null;
-  try { summary = summarize(d); } catch (_e) { return reply(422, { ok: false, error: 'Não foi possível calcular o resumo dos dados.' }); }
-
-  // 4) gravação atômica (função SQL painel_publish), com a chave secreta
-  let res: Response;
-  try {
-    res = await fetch(SB + '/rest/v1/rpc/painel_publish', {
-      method: 'POST',
-      headers: adm,
-      body: JSON.stringify({
-        p_period_key: periodKey,
-        p_file_name: file.trim(),
-        p_checksum: checksum,
-        p_data: d,
-        p_summary: summary,
-        p_published_by: email,
-        p_set_current: setCurrent,
-      }),
-    });
-  } catch (_e) {
-    return reply(502, { ok: false, error: 'Sem conexão com o Supabase. A versão anterior foi preservada.' });
-  }
-  if (!res.ok) {
-    console.error('painel_publish falhou', res.status, (await res.text()).slice(0, 500));
+  const rpcError = async (res: Response): Promise<Response> => {
+    // deno-lint-ignore no-explicit-any
+    let j: any = null; const txt = await res.text();
+    try { j = JSON.parse(txt); } catch (_e) { /* corpo não JSON */ }
+    const msg = String((j && j.message) || '');
+    // deno-lint-ignore no-explicit-any
+    let det: any = null; try { det = j && j.details ? JSON.parse(j.details) : null; } catch (_e) { det = null; }
+    if (res.status === 409 && msg.includes('conteudo_identico'))
+      return reply(409, { ok: false, code: 'conteudo_identico', currentRevision: det && det.current, error: 'O conteúdo é idêntico ao que já está publicado para este mês. Nenhuma revisão foi criada.' });
+    if (res.status === 409 && msg.includes('revisao_alterada'))
+      return reply(409, { ok: false, code: 'revisao_alterada', currentRevision: det && det.current, expectedRevision: det && det.expected, error: 'Outra publicação deste mês aconteceu depois da sua conferência. Nada foi gravado: atualize e confira novamente.' });
+    if (res.status === 404 && msg.includes('versao_inexistente')) return reply(404, { ok: false, code: 'versao_inexistente', error: 'Esta versão não existe no histórico.' });
+    if (res.status === 404 && msg.includes('mes_inexistente')) return reply(404, { ok: false, code: 'mes_inexistente', error: 'Este mês ainda não foi publicado.' });
+    console.error('rpc falhou', res.status, txt.slice(0, 500));
     return reply(502, { ok: false, error: 'Falha ao gravar no banco. A versão anterior foi preservada.' });
+  };
+  const missingObject = (status: number, txt: string) => status === 404 && /PGRST20[25]|42P01|42883|Could not find/i.test(txt);
+  const keyOk = (k: unknown): k is string => typeof k === 'string' && KEY_RE.test(k);
+  const VCOLS = 'id,period_key,revision,file_name,checksum,published_by,published_at,action,restored_from_revision,set_current';
+
+  // ---------------------------------------------------------------- publicar
+  if (action === 'publish') {
+    const { file, periodKey, checksum, dataJson } = body;
+    const setCurrent = body.setCurrent === false ? false : true;
+    const expected = expectedOf(body.expectedRevision);
+    if (!keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
+    if (typeof file !== 'string' || !file.trim() || file.length > 255 || /[\u0000-\u001f]/.test(file)) return reply(422, { ok: false, error: 'Nome de arquivo inválido.' });
+    if (typeof dataJson !== 'string' || typeof checksum !== 'string') return reply(422, { ok: false, error: 'Dados ausentes.' });
+    if (Number.isNaN(expected)) return reply(422, { ok: false, error: 'Revisão esperada inválida.' });
+    if (fnv(dataJson) !== checksum) return reply(422, { ok: false, error: 'Verificação de integridade falhou (checksum).' });
+
+    // deno-lint-ignore no-explicit-any
+    let d: any;
+    try { d = JSON.parse(dataJson); } catch (_e) { return reply(422, { ok: false, error: 'Dados ilegíveis.' }); }
+    const errs = validatePayload(d, periodKey);
+    if (errs.length) return reply(422, { ok: false, error: 'A validação do servidor recusou os dados. A versão anterior foi preservada.', details: errs.slice(0, 20) });
+
+    // deno-lint-ignore no-explicit-any
+    let summary: any = null;
+    try { summary = summarize(d); } catch (_e) { return reply(422, { ok: false, error: 'Não foi possível calcular o resumo dos dados.' }); }
+
+    // 4) gravação atômica: painel_publish_v2 (conteúdo idêntico + concorrência); sem a migration, cai para a v1
+    const args = { p_period_key: periodKey, p_file_name: file.trim(), p_checksum: checksum, p_data: d, p_summary: summary, p_published_by: email, p_set_current: setCurrent };
+    let res: Response, legacy = false;
+    try {
+      res = await api('rpc/painel_publish_v2', { method: 'POST', body: JSON.stringify({ ...args, p_expected_revision: expected }) });
+      if (res.status === 404) {
+        const txt = await res.clone().text();
+        if (missingObject(404, txt)) { legacy = true; res = await api('rpc/painel_publish', { method: 'POST', body: JSON.stringify(args) }); }
+      }
+    } catch (_e) {
+      return reply(502, { ok: false, error: 'Sem conexão com o Supabase. A versão anterior foi preservada.' });
+    }
+    if (!res.ok) return rpcError(res);
+    const out = await res.json();
+    return reply(200, {
+      ok: true, key: periodKey, checksum, publishedAt: out.published_at, revision: out.revision,
+      previousRevision: out.previous_revision ?? null, replaced: !!out.replaced, currentSet: !!out.current_set,
+      action: 'publish', legacy,
+    });
   }
-  const out = await res.json();
-  return reply(200, {
-    ok: true,
-    key: periodKey,
-    checksum,
-    publishedAt: out.published_at,
-    revision: out.revision,
-    replaced: !!out.replaced,
-    currentSet: !!out.current_set,
-  });
+
+  // ------------------------------------------------- recuperar versão antiga
+  if (action === 'restore') {
+    const { periodKey } = body;
+    const revision = revOf(body.revision), expected = expectedOf(body.expectedRevision);
+    if (!keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
+    if (Number.isNaN(revision)) return reply(422, { ok: false, error: 'Revisão inválida.' });
+    if (expected == null || Number.isNaN(expected)) return reply(422, { ok: false, error: 'Informe a revisão vigente conferida (expectedRevision).' });
+    let res: Response;
+    try {
+      res = await api('rpc/painel_restore_version', { method: 'POST', body: JSON.stringify({
+        p_period_key: periodKey, p_revision: revision, p_published_by: email, p_set_current: body.setCurrent === true, p_expected_revision: expected }) });
+    } catch (_e) {
+      return reply(502, { ok: false, error: 'Sem conexão com o Supabase. Nada foi alterado.' });
+    }
+    if (res.status === 404) { const txt = await res.clone().text(); if (missingObject(404, txt) && !/versao_inexistente|mes_inexistente/.test(txt)) return reply(501, MIGRACAO); }
+    if (!res.ok) return rpcError(res);
+    const out = await res.json();
+    return reply(200, {
+      ok: true, key: periodKey, action: 'restore', revision: out.revision, previousRevision: out.previous_revision,
+      restoredFromRevision: out.restored_from_revision, checksum: out.checksum, file: out.file_name,
+      publishedAt: out.published_at, replaced: true, currentSet: !!out.current_set,
+    });
+  }
+
+  // --------------------------------------------- consultas do histórico
+  if (action === 'versions' || action === 'version' || action === 'backup') {
+    // deno-lint-ignore no-explicit-any
+    const get = async (path: string): Promise<{ status: number; rows: any }> => {
+      const r = await api(path, { headers: { Accept: 'application/json' } });
+      const txt = await r.text();
+      if (missingObject(r.status, txt)) return { status: 501, rows: null };
+      if (!r.ok) { console.error('consulta falhou', r.status, txt.slice(0, 300)); return { status: 502, rows: null }; }
+      return { status: 200, rows: JSON.parse(txt) };
+    };
+    try {
+      if (action === 'versions') {
+        const periodKey = body.periodKey;
+        if (periodKey != null && !keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
+        const f = periodKey ? '&period_key=eq.' + encodeURIComponent(periodKey) : '';
+        const [v, m, p, c] = await Promise.all([
+          get('painel_month_versions?select=' + VCOLS + f + '&order=period_key.asc,revision.desc'),
+          get('painel_months?select=period_key,revision,checksum,file_name,published_at' + f + '&order=period_key.asc'),
+          get('painel_publications?select=period_key,revision,checksum,file_name,published_by,published_at' + f + '&order=id.asc'),
+          get('painel_current?select=period_key,checksum&id=eq.1'),
+        ]);
+        if (v.status === 501) return reply(501, MIGRACAO);
+        if ([v, m, p, c].some((x) => x.status !== 200)) return reply(502, { ok: false, error: 'Não foi possível consultar o histórico no banco.' });
+        // revisões publicadas antes do histórico de versões: só metadados (dados já sobrescritos)
+        // deno-lint-ignore no-explicit-any
+        const have = new Set(v.rows.map((x: any) => x.period_key + '|' + x.revision));
+        // deno-lint-ignore no-explicit-any
+        const lost = p.rows.filter((x: any) => !have.has(x.period_key + '|' + x.revision));
+        return reply(200, { ok: true, periodKey: periodKey || null, current: c.rows[0] || null, months: m.rows, versions: v.rows, lost });
+      }
+      if (action === 'version') {
+        const periodKey = body.periodKey, revision = revOf(body.revision);
+        if (!keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
+        if (Number.isNaN(revision)) return reply(422, { ok: false, error: 'Revisão inválida.' });
+        const v = await get('painel_month_versions?select=' + VCOLS + ',data,summary&period_key=eq.' + encodeURIComponent(periodKey) + '&revision=eq.' + revision);
+        if (v.status === 501) return reply(501, MIGRACAO);
+        if (v.status !== 200) return reply(502, { ok: false, error: 'Não foi possível consultar a versão.' });
+        if (!v.rows.length) return reply(404, { ok: false, code: 'versao_inexistente', error: 'Esta versão não existe no histórico.' });
+        return reply(200, { ok: true, version: v.rows[0] });
+      }
+      // backup: todas as versões completas + metadados (somente publicadores autorizados)
+      const [v, m, p, c] = await Promise.all([
+        get('painel_month_versions?select=' + VCOLS + ',data,summary&order=period_key.asc,revision.asc'),
+        get('painel_months?select=period_key,revision,checksum,file_name,published_at&order=period_key.asc'),
+        get('painel_publications?select=*&order=id.asc'),
+        get('painel_current?select=period_key,file_name,checksum,published_at&id=eq.1'),
+      ]);
+      if (v.status === 501) return reply(501, MIGRACAO);
+      if ([v, m, p, c].some((x) => x.status !== 200)) return reply(502, { ok: false, error: 'Não foi possível ler os dados para o backup.' });
+      return reply(200, { ok: true, exportedAt: new Date().toISOString(), exportedBy: email, current: c.rows[0] || null, months: m.rows, publications: p.rows, versions: v.rows });
+    } catch (_e) {
+      return reply(502, { ok: false, error: 'Sem conexão com o Supabase.' });
+    }
+  }
+
+  return reply(400, { ok: false, error: 'Ação desconhecida.' });
 }
 
 // deno-lint-ignore no-explicit-any

@@ -10,7 +10,13 @@ docs/index.html                       ← o painel (o GitHub Pages publica a pas
 supabase/functions/painel-publish/    ← Edge Function que publica os meses (Supabase)
 supabase/painel_ftr.sql               ← tabelas, RLS e função SQL painel_publish (já aplicado)
 supabase/painel_publicadores.sql      ← lista privada de quem pode publicar
+supabase/migrations/                  ← histórico de versões e restauração (com rollback)
+tests/                                ← testes (banco temporário, Edge, painel e ponta a ponta)
+documentacao/                         ← documentação das melhorias e auditoria (não é publicada)
 ```
+
+Testes: `bash tests/executar_todos.sh` (não acessa o Supabase de produção).
+Melhorias de versões, backup, revisão da importação e exportações: veja `documentacao/MELHORIAS.md`.
 
 ## Como funciona
 

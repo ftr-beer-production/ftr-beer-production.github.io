@@ -215,6 +215,19 @@ body.tv .card{box-shadow:none}body.tv .ch h2{font-size:16px}
 .tm>span.hs2{display:inline-flex;margin:0}
 @media(max-width:900px){.app{grid-template-columns:minmax(0,1fr)}.side{border-right:0;box-shadow:0 0 24px rgba(0,0,0,.25);width:260px}.pvb .btn{width:auto}}
 @media(max-width:640px){.hs2{white-space:normal;border-radius:12px;align-items:flex-start}.hs2 b{overflow:visible;text-overflow:clip;word-break:break-word}.hs2 i{white-space:nowrap}.dot{margin-top:5px;flex:none}.tl h1{font-size:16px}.hctl .btn,.adm summary{padding:7px 11px}}
+/* conferência, versões e gestão */
+.dlgm.dlgw{max-width:980px}
+/* menu Administração: nunca ultrapassa a altura da tela (itens finais continuam acessíveis em telas baixas) */
+.menu{max-height:calc(100vh - 96px);overflow-y:auto;overscroll-behavior:contain}
+.rvg{grid-template-columns:190px 1fr;margin:8px 0}
+.rvks{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:10px 0}
+.rvk{border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px}
+.rvk span{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}.rvk b{font-size:18px}.rvk em{font-style:normal;font-size:12px;color:var(--mute)}
+.rvl{margin:4px 0 0;padding-left:20px}.rvl li{margin:2px 0}.rvl.e li{color:var(--red)}.rvl.w li::marker{color:var(--amb)}.rvl.i li{color:var(--mute)}
+.ambt{color:var(--amb);font-weight:700}.rvid{background:var(--infobg);color:var(--info);padding:8px 10px;border-radius:8px}
+.rvh{margin:14px 0 6px;font-size:13px}.cmp tr.rvch td{background:var(--ambbg)}.rvd{margin-top:8px}.rvd summary{cursor:pointer;color:var(--mute)}
+.rvms{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.rvcb{display:flex;gap:8px;align-items:center;margin-top:8px}
+@media (max-width:640px){.rvg{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -231,14 +244,19 @@ body.tv .card{box-shadow:none}body.tv .ch h2{font-size:16px}
 <details class="adm" id="adm"><summary>Administração</summary><div class="menu"><h4>Dados</h4>
 <button id="bimp" data-imp>Importar Excel<small>Lê o arquivo do mês e atualiza o painel neste navegador</small></button>
 <button data-bk="imp">Restaurar backup<small>Recupera meses de um arquivo JSON, com validação</small></button>
-<button data-bk="exp">Exportar backup (JSON)<small>Cópia de segurança do histórico mensal</small></button>
+<button data-bk="exp">Exportar backup (JSON)<small>Cópia de segurança do histórico mensal deste navegador</small></button>
+<button data-bk="xlsx">Exportar dados (Excel)<small>Indicadores, histórico, lotes, desvios, parâmetros e comparação</small></button>
+<button data-bk="csv">Exportar dados (CSV)<small>Uma tabela por arquivo, respeitando os filtros</small></button>
 <hr><h4>Publicação central (Supabase)</h4>
 <button data-sync="1">Atualizar do servidor<small>Busca a versão publicada agora</small></button>
 <button data-login="1">Entrar para publicar<small>Login de usuário autorizado (validado no servidor)</small></button>
 <button data-logout="1">Sair da sessão de publicação<small>Encerra o login neste navegador</small></button>
+<button data-vers="">Versões publicadas<small>Histórico completo de cada mês e recuperação</small></button>
+<button data-bk="sbk">Backup completo do servidor<small>Todas as versões publicadas (JSON, requer login)</small></button>
+<button data-bk="sbkchk">Verificar backup do servidor<small>Prévia e validação de integridade, sem gravar</small></button>
 <button data-bk="pub">Gerar painel com dados embutidos<small>Método manual antigo (index.html)</small></button>
 <hr><button data-p="8">Configurações<small>Publicação, dados salvos, tema, modo TV e regras</small></button></div></details>
-<input type="file" id="fimp" accept=".xlsx" hidden><input type="file" id="fbk" accept=".json,application/json" hidden></div>
+<input type="file" id="fimp" accept=".xlsx" hidden><input type="file" id="fbk" accept=".json,application/json" hidden><input type="file" id="fsbk" accept=".json,application/json" hidden></div>
 <div class="hrow"><div class="hctx"><label class="msw">Mês <select id="msel" aria-label="Mês exibido"></select></label><span class="hper" id="hper"></span></div><div class="tm" id="tmeta"></div></div></header>
 <div id="vbar" class="vbar" role="status" hidden></div>
 <div id="cbar" class="cbar" role="status" hidden></div>
@@ -255,6 +273,8 @@ body.tv .card{box-shadow:none}body.tv .ch h2{font-size:16px}
 /*PURE_START*/
 const num=v=>typeof v==='number'&&isFinite(v)?v:null;
 const IGN=v=>typeof v==='string'&&/^(#[A-Z0-9\/]+[!?]?|n\.?a\.?|n\/a)$/i.test(v.trim());
+// Valor inválido = célula preenchida que não é número nem marcador ignorado (#REF!, n.a.). Só é contado para avisar; o cálculo não muda.
+const BADV=v=>v!=null&&!(typeof v==='string'&&(!v.trim()||IGN(v)))&&num(v)==null;
 const MES=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const PK=[[/extr/i,'ext','Extrato final de fervura (°P)'],[/tempo/i,'tmp','Tempo total de fabricação (min)'],[/aera/i,'aer','Aeração (mg/L)']];
 const title=s=>s.replace(/^MOSTO /i,'').replace(/\s+/g,' ').trim();
@@ -262,7 +282,7 @@ const title=s=>s.replace(/^MOSTO /i,'').replace(/\s+/g,' ').trim();
 function cls(x,p){if(x==null)return'ausente';if(p.lo==null&&p.hi==null)return'sem limite';return(p.lo==null||x>=p.lo)&&(p.hi==null||x<=p.hi)?'dentro':'fora'}
 const SENT={dentro:'GOOD',fora:'WRONG'};
 function parseWorkbook(S,file){
-  const issues=[],rec=[],groups=[],lots=[],keys=new Set(),bhB={},ign={};let dup=0,blocks=0,psrc=null;
+  const issues=[],rec=[],groups=[],lots=[],keys=new Set(),bhB={},ign={},qv={};let dup=0,blocks=0,psrc=null;
   const tally=(sh,v)=>{if(IGN(v)){const k=sh+'|'+(/^#/.test(v.trim())?v.trim().toUpperCase():'n.a./N/A');ign[k]=(ign[k]||0)+1}};
   [['BREWHOUSE 1','Sala 1'],['BREWHOUSE 3','Sala 3']].forEach(([sh,sala])=>{
     const R=S[sh];if(!R){issues.push('Aba ausente: '+sh);return}rec.push(sh);
@@ -281,7 +301,7 @@ function parseWorkbook(S,file){
       for(let r=12;r<=311;r++){const ref=g(r,c+1);const v=P.map((_,i)=>num(g(r,c+2+i)));const ig=P.map((_,i)=>IGN(g(r,c+2+i)));
         if(!ref||v.every(x=>x==null))continue;
         const key=sala+'|'+name+'|'+ref;if(keys.has(key)){dup++;continue}keys.add(key);
-        ig.forEach((b,i)=>{if(b)tally(sh,g(r,c+2+i))});
+        ig.forEach((b,i)=>{if(b)tally(sh,g(r,c+2+i))});P.forEach((_,i)=>{if(BADV(g(r,c+2+i)))qv[sh]=(qv[sh]||0)+1});
         L.push({ref:String(ref).trim(),v,s:P.map((_,i)=>String(g(r,sc+i)||'')),...(ig.some(Boolean)?{ig}:{})})}
       if(L.length){const gi=groups.length;groups.push({id:sala+'|'+title(name),sala,sheet:sh,mosto:title(name),p:P});L.forEach(l=>lots.push({g:gi,sala,sheet:sh,mosto:title(name),...l}))}
     });
@@ -310,7 +330,7 @@ function parseWorkbook(S,file){
     ...['BREWHOUSE 1','BREWHOUSE 3'].map(n=>({name:n,role:'detail',state:stOf(n,!!S[n],(bhB[n]||0)>0),lots:lots.filter(l=>l.sheet===n).length})),
     ...FEN.map(n=>({name:n,role:'detail',state:stOf(n,!!S[n],stg(fe,n)),lots:fe.lots.filter(l=>l.sheet===n).length})),{name:'BRIGHT BEER',role:'detail',state:stOf('BRIGHT BEER',!!S['BRIGHT BEER'],stg(bb,'BRIGHT BEER')),lots:bb.lots.length}];
   sources.forEach(s=>{s.ok=s.state==='ok'});
-  return{file,period:per,meta,ftrGeral,consol,groups,lots,fe,bb,sources,rec,issues,blocks,dq:{periodSrc:psrc,dup,blocksBy:bhB,ign:{...ign,...fe.ign,...bb.ign}}};
+  return{file,period:per,meta,ftrGeral,consol,groups,lots,fe,bb,sources,rec,issues,blocks,dq:{periodSrc:psrc,dup,blocksBy:bhB,ign:{...ign,...fe.ign,...bb.ign}},qv:{...qv,...fe.qv,...bb.qv}};
 }
 function agg(rs){const a={n:rs.length,dentro:0,fora:0,sem:0},ev=new Set(),bad=new Set();
   rs.forEach(r=>{if(r.st==='dentro'){a.dentro++;ev.add(r.l)}else if(r.st==='fora'){a.fora++;ev.add(r.l);bad.add(r.l)}else a.sem++});
@@ -321,7 +341,7 @@ function mkReadingsOf(groups,lots){const o=[];lots.forEach(l=>{const G=groups[l.
 const mkReadings=D=>mkReadingsOf(D.groups,D.lots);
 // ---- Abas de detalhe com blocos (BRIGHT BEER e abas FERMENT*): estrutura lida do próprio arquivo, sem nomes inventados
 function parseStage(R,sheet){
-  const g=(r,c)=>{const row=R[r-1];return row?row[c-1]:undefined},MAXC=702,MAXR=330,out={sheet,groups:[],lots:[],blocks:0,issues:[],ok:true,ign:{}};
+  const g=(r,c)=>{const row=R[r-1];return row?row[c-1]:undefined},MAXC=702,MAXR=330,out={sheet,groups:[],lots:[],blocks:0,issues:[],ok:true,ign:{},qv:{}};
   const isH=(r,c)=>g(r,c)==='Nº Batch'&&String(g(r,c+1)??'').startsWith('Par'),HR=[];
   for(let r=1;r<=MAXR;r++){for(let c=1;c<=MAXC;c++)if(isH(r,c)){HR.push(r);break}}
   if(!HR.length){out.ok=false;out.issues.push(sheet+': cabeçalho "Nº Batch / Parâmetro" não encontrado');return out}
@@ -342,12 +362,12 @@ function parseStage(R,sheet){
     if(!P.length)continue;
     const off=ftr-1-(s-1),L=[];
     for(let r=dr+1;r<=endR;r++){const ref=g(r,c+1);if(ref==null||ref==='')continue;const v=P.map(p=>num(g(r,p.col))),ig=P.map(p=>IGN(g(r,p.col)));if(v.every(x=>x==null))continue;
-      ig.forEach((b,i)=>{if(b){const w=String(g(r,P[i].col)).trim(),k=sheet+'|'+(/^#/.test(w)?w.toUpperCase():'n.a./N/A');out.ign[k]=(out.ign[k]||0)+1}});
+      ig.forEach((b,i)=>{if(b){const w=String(g(r,P[i].col)).trim(),k=sheet+'|'+(/^#/.test(w)?w.toUpperCase():'n.a./N/A');out.ign[k]=(out.ign[k]||0)+1}});P.forEach(p=>{if(BADV(g(r,p.col)))out.qv[sheet]=(out.qv[sheet]||0)+1});
       L.push({ref:String(ref).trim(),v,s:P.map(p=>String(g(r,p.col+off)||'')),...(ig.some(Boolean)?{ig}:{})})}
     out.blocks++;if(L.length){const gi=out.groups.length;out.groups.push({id:sheet+'|'+title(nm),sheet,mosto:title(nm),sparse:true,p:P});L.forEach(l=>out.lots.push({g:gi,sheet,...l}))}}});
   if(!out.blocks){out.ok=false;out.issues.push(sheet+': nenhum bloco de dados reconhecido')}
   return out}
-function mergeStages(list){const o={sheets:[],groups:[],lots:[],blocks:0,issues:[],ign:{}};list.forEach(x=>{Object.entries(x.ign||{}).forEach(([k,n])=>{o.ign[k]=(o.ign[k]||0)+n});const off=o.groups.length;o.sheets.push({name:x.sheet,lots:x.lots.length,blocks:x.blocks,ok:x.ok});o.groups.push(...x.groups);x.lots.forEach(l=>o.lots.push({...l,g:l.g+off}));o.blocks+=x.blocks;o.issues.push(...x.issues)});return o}
+function mergeStages(list){const o={sheets:[],groups:[],lots:[],blocks:0,issues:[],ign:{},qv:{}};list.forEach(x=>{Object.entries(x.ign||{}).forEach(([k,n])=>{o.ign[k]=(o.ign[k]||0)+n});Object.entries(x.qv||{}).forEach(([k,n])=>{o.qv[k]=(o.qv[k]||0)+n});const off=o.groups.length;o.sheets.push({name:x.sheet,lots:x.lots.length,blocks:x.blocks,ok:x.ok});o.groups.push(...x.groups);x.lots.forEach(l=>o.lots.push({...l,g:l.g+off}));o.blocks+=x.blocks;o.issues.push(...x.issues)});return o}
 const SLOTS=['CONSOL.','BREWHOUSE 1','BREWHOUSE 3','FERMENTHP','FERMENTAMSTELPRAY','BRIGHT BEER'];
 // Casamento exato após ignorar maiúsculas/minúsculas e espaços nas pontas; nunca por semelhança (FERMENTSP, FERMENTEISENBAHN etc. não substituem nada)
 function sheetSlots(names){return SLOTS.map(s=>{const m=names.filter(n=>String(n).trim().toUpperCase()===s);return{slot:s,ok:m.length===1,matches:m,found:m[0]||null}})}
@@ -377,6 +397,79 @@ function summarize(d){const R=stageReadings(d),C=d.consol||[],o={key:pkeyOf(d.pe
   STG.forEach(([k,n])=>{const a=agg(R[k]),row=C.find(x=>rx[k].test(x.l));o.stages[k]={name:n,off:row?row.p*100:null,meta:row?metaNorm(row):null,rec:a.ftr,lots:a.lots,lotsBad:a.lotsBad,fora:a.fora,conf:a.conf};o.tot.lots+=a.lots;o.tot.lotsBad+=a.lotsBad;o.tot.fora+=a.fora});
   o.fe={};const bs={};R.fe.forEach(r=>{(bs[r.l.sheet]=bs[r.l.sheet]||[]).push(r)});Object.entries(bs).forEach(([n,x])=>{const a=agg(x);o.fe[n]={lots:a.lots,lotsBad:a.lotsBad,fora:a.fora,conf:a.conf}});return o}
 function divList(d){const o=[];[[d.groups,d.lots],[d.fe.groups,d.fe.lots],[d.bb.groups,d.bb.lots]].forEach(([G,L])=>{mkReadingsOf(G,L).forEach(r=>{if(r.st==='ausente'||r.st==='sem limite')return;const sp=r.l.s[r.G.p.indexOf(r.p)];if(SENT[r.st]!==sp)o.push({sheet:r.l.sheet,ref:r.l.ref,n:r.p.n,x:r.x,st:r.st,sp})})});return o}
+// ---- Conferência antes de publicar, comparação e exportações (puros; não alteram nenhuma regra de cálculo)
+// Período sugerido pelo nome do arquivo (mesma regra usada por parseWorkbook quando a CONSOL. não tem data)
+function periodFromName(file){const nz=s=>s.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase(),fm=nz(String(file||'')),mi=MES.findIndex(m=>fm.includes(nz(m))),ym=/(20\d\d)/.exec(fm);return mi>=0&&ym?{m:mi,y:+ym[1]}:null}
+// Leituras classificadas (dentro + fora) por etapa: "registros válidos" da conferência
+function validCount(d){const R=stageReadings(d);let n=0;STG.forEach(([k])=>{const a=agg(R[k]);n+=a.dentro+a.fora});return n}
+// Diferenças entre dois resumos (summarize). Mostra todas as diferenças; não usa limiar inventado.
+const SDIFF=[['FTR geral (oficial)',s=>s.ftrGeral,'p'],['Meta (oficial)',s=>s.meta,'p'],
+  ...STG.flatMap(([k,n])=>[['FTR '+n+' (oficial)',s=>s.stages[k].off,'p'],['FTR '+n+' (recalculado)',s=>s.stages[k].rec,'p'],['Lotes avaliados · '+n,s=>s.stages[k].lots,'i'],['Lotes com desvio · '+n,s=>s.stages[k].lotsBad,'i'],['Ocorrências fora · '+n,s=>s.stages[k].fora,'i']]),
+  ['Lotes avaliados (total)',s=>s.tot.lots,'i'],['Lotes com desvio (total)',s=>s.tot.lotsBad,'i'],['Ocorrências fora (total)',s=>s.tot.fora,'i']];
+function summaryDiff(a,b){return SDIFF.map(([l,f,t])=>{const x=a?f(a):null,y=b?f(b):null,both=typeof x==='number'&&typeof y==='number';
+  return{l,t,a:x??null,b:y??null,d:both?y-x:null,changed:both?Math.abs(y-x)>1e-9:(x??null)!==(y??null)}})}
+// Conferência de uma importação: erros impeditivos x avisos, números do arquivo e comparação com a publicação vigente.
+// o = {file, ignoredSheets, chk (resultado de chk), validate (validateData), checksum (do novo conteúdo), published:{revision,checksum,publishedAt,file,sum}|null, local:{file,savedAt}|null}
+function reviewImport(d,o){o=o||{};const E=[],W=[],I=[],s=summarize(d),key=pkeyOf(d.period),add=(L,x)=>{if(!L.includes(x))L.push(x)};
+  if(!key)add(E,'Período não identificado no arquivo: sem o período não é possível publicar.');
+  (d.sources||[]).filter(x=>x.state!=='ok').forEach(x=>add(E,'Aba '+x.name+': '+(x.state==='ausente'?'ausente no arquivo':'estrutura não reconhecida')+'.'));
+  if(!d.lots.length)add(E,'Nenhum lote reconhecido em BREWHOUSE 1 / BREWHOUSE 3.');
+  if(!d.fe.lots.length)add(E,'Nenhum lote reconhecido em FERMENTHP / FERMENTAMSTELPRAY.');
+  const ve=o.validate?o.validate(d):null;if(ve)add(E,'Estrutura dos dados inválida: '+ve+'.');
+  (d.issues||[]).forEach(x=>add(W,x));
+  const pn=periodFromName(o.file||d.file),pk=pn&&pkeyOf(pn);
+  if(key&&pk&&pk!==key&&d.dq&&d.dq.periodSrc==='CONSOL.!F1')add(W,'Períodos incompatíveis: a CONSOL. indica '+keyLabel(key)+', mas o nome do arquivo sugere '+keyLabel(pk)+'. Confira se é o arquivo certo.');
+  if((o.ignoredSheets||[]).length)add(W,'Abas inesperadas no arquivo, não usadas pelo painel: '+o.ignoredSheets.join(', ')+'.');
+  (d.sources||[]).filter(x=>x.name!=='CONSOL.'&&x.state==='ok'&&x.lots===0).forEach(x=>add(W,'Dados vazios: nenhum lote reconhecido em '+x.name+'.'));
+  if(d.consol&&!d.consol.length)add(W,'Dados vazios: nenhuma linha de indicador na CONSOL.');
+  Object.entries(d.qv||{}).forEach(([sh,n])=>add(W,'Valores inválidos em '+sh+': '+n+' célula(s) com texto onde se espera número, tratadas como sem valor (regra atual).'));
+  Object.entries((d.dq&&d.dq.ign)||{}).forEach(([k,n])=>{const[sh,m]=k.split('|');add(I,sh+': '+n+' célula(s) '+m+' ignorada(s), como define a regra atual.')});
+  if(o.chk){if(o.chk.div)add(W,o.chk.div+' leitura(s) com classificação diferente da coluna GOOD/WRONG da planilha.');
+    const bad=(o.chk.rows||[]).filter(r=>r[2]!==r[4]||r[3]!==r[5]).length;if(bad)add(W,'Conferência com a CONSOL.: '+bad+' indicador(es) com contagem diferente do recálculo das abas de detalhe.')}
+  const P=o.published||null,identical=!!(P&&o.checksum&&P.checksum===o.checksum),diff=P&&P.sum?summaryDiff(P.sum,s):null,changed=diff?diff.filter(x=>x.changed).length:0;
+  if(P&&!identical&&diff&&changed)add(W,'Diferenças em relação à publicação vigente deste mês (revisão '+P.revision+'): '+changed+' indicador(es) mudaram. Veja a comparação abaixo.');
+  if(P&&!identical&&diff&&!changed)add(W,'O conteúdo é diferente da revisão '+P.revision+' publicada, mas os indicadores resumidos são iguais (mudaram detalhes de lotes ou leituras).');
+  return{key,errors:E,warnings:W,info:I,identical,diff,nextRevision:P?P.revision+1:1,
+    stats:{file:o.file||d.file,ftrGeral:s.ftrGeral,meta:s.meta,stages:s.stages,lotsRead:d.lots.length+d.fe.lots.length+d.bb.lots.length,lotsEval:s.tot.lots,lotsBad:s.tot.lotsBad,valid:validCount(d),fora:s.tot.fora,sheets:(d.rec||[]).slice()},sum:s}}
+
+// ---- Exportações (Excel/CSV): tabelas com tipos explícitos. Tipos: s texto · n número · i inteiro · p percentual (em %) · d data/hora
+function exportTables(c){const D0=c.D,S0=c.sum,T=[],tb=(name,title,cols,rows)=>T.push({name,title,cols,rows});
+  const R=c.R||{bh:[],fe:[],bb:[]},STGN=Object.fromEntries(STG),ST={dentro:'Dentro',fora:'Fora',ausente:'Ausente','sem limite':'Sem limite'};
+  tb('Indicadores gerais','Indicadores gerais (CONSOL.) · '+keyLabel(pkeyOf(D0.period)),[['Seção','s'],['Indicador','s'],['Norma / meta','s'],['Base (n)','n'],['Falhas','n'],['Resultado','p']],
+    [['Resumo','FTR geral','Meta '+(S0.meta!=null?S0.meta+'%':'—'),null,null,S0.ftrGeral],...(D0.consol||[]).map(r=>[r.sec,r.l,typeof r.norm==='string'?r.norm:String(r.norm??''),r.n,r.f,typeof r.p==='number'?r.p*100:null])]);
+  tb('Por etapa','Indicadores por etapa · '+keyLabel(pkeyOf(D0.period)),[['Etapa','s'],['FTR oficial','p'],['Meta','p'],['FTR recalculado','p'],['Lotes avaliados','i'],['Lotes com desvio','i'],['Ocorrências fora','i'],['Conformidade das leituras','p']],
+    STG.map(([k,n])=>{const x=S0.stages[k];return[n,x.off,x.meta,x.rec,x.lots,x.lotsBad,x.fora,x.conf]}));
+  tb('Histórico mensal','Histórico mensal',[['Período','s'],['Arquivo','s'],['Importado/publicado em','d'],['Situação','s'],['FTR geral','p'],['Meta','p'],['FTR Brewhouse','p'],['FTR Fermentação','p'],['FTR Bright Beer','p'],['Lotes com desvio','i'],['Ocorrências fora','i']],
+    (c.hist||[]).map(h=>[keyLabel(h.key),h.file,h.savedAt,h.central?'Publicado no servidor':h.pub?'Publicado (embutido)':'Só neste navegador',h.sum.ftrGeral,h.sum.meta,h.sum.stages.bh.off,h.sum.stages.fe.off,h.sum.stages.bb.off,h.sum.tot.lotsBad,h.sum.tot.fora]));
+  const lots=new Map();STG.forEach(([k])=>(R[k]||[]).forEach(r=>{let o=lots.get(r.l);if(!o){o={k,l:r.l,G:r.G,n:0,f:0};lots.set(r.l,o)}if(r.st==='dentro'||r.st==='fora')o.n++;if(r.st==='fora')o.f++}));
+  tb('Lotes analisados','Lotes analisados (recorte dos filtros ativos)',[['Etapa','s'],['Fonte (aba)','s'],['Sala','s'],['Mosto','s'],['Lote','s'],['Leituras classificadas','i'],['Leituras fora','i'],['Situação','s']],
+    [...lots.values()].map(o=>[STGN[o.k],o.l.sheet,o.l.sala||'',o.G.mosto,o.l.ref,o.n,o.f,o.f?'Com desvio':o.n?'Conforme':'Sem classificação']));
+  const fora=STG.flatMap(([k])=>(R[k]||[]).filter(r=>r.st==='fora').map(r=>[STGN[k],r.l.sheet,r.l.sala||'',r.G.mosto,r.l.ref,r.p.n,r.p.ctx||'',r.x,r.p.t,r.p.lo,r.p.hi,r.dev,ST[r.st]]));
+  tb('Lotes com desvios','Leituras fora do padrão (recorte dos filtros ativos)',[['Etapa','s'],['Fonte (aba)','s'],['Sala','s'],['Mosto','s'],['Lote','s'],['Parâmetro','s'],['Contexto','s'],['Valor','n'],['Alvo','n'],['Mínimo','n'],['Máximo','n'],['Desvio','n'],['Situação','s']],fora);
+  const par=[];[['bh',D0.groups],['fe',D0.fe.groups],['bb',D0.bb.groups]].forEach(([k,G])=>(G||[]).forEach(g=>g.p.forEach(p=>par.push([STGN[k],g.sheet,g.sala||'',g.mosto,p.n,p.ctx||'',p.t,p.lo,p.hi,p.lo==null&&p.hi==null?'Sem limite':'Com limite']))));
+  tb('Parâmetros','Parâmetros disponíveis na base (limites lidos do arquivo)',[['Etapa','s'],['Fonte (aba)','s'],['Sala','s'],['Mosto','s'],['Parâmetro','s'],['Contexto','s'],['Alvo','n'],['Mínimo','n'],['Máximo','n'],['Classificação','s']],par);
+  if(c.cmp&&c.cmp.a&&c.cmp.b)tb('Comparação','Comparação entre períodos: '+keyLabel(c.cmp.a.key)+' × '+keyLabel(c.cmp.b.key),[['Indicador','s'],[keyLabel(c.cmp.a.key),'n'],[keyLabel(c.cmp.b.key),'n'],['Diferença (p.p. ou quantidade)','n']],
+    summaryDiff(c.cmp.a.sum,c.cmp.b.sum).map(x=>[x.l,x.a,x.b,x.d]));
+  else tb('Comparação','Comparação entre períodos',[['Observação','s']],[['São necessários ao menos dois meses no histórico para comparar.']]);
+  tb('Informações','Sobre esta exportação',[['Campo','s'],['Valor','s']],[['Gerado em',c.generatedAt],['Período exibido',keyLabel(pkeyOf(D0.period))],['Arquivo de origem',D0.file],['Filtros aplicados',c.filters||'nenhum'],
+    ['Observação','Indicadores oficiais vêm da CONSOL.; lotes, leituras e recálculos vêm das abas de detalhe, com as mesmas regras do painel. Percentuais estão em %.']]);
+  return T}
+// CSV (Excel pt-BR): ponto e vírgula, vírgula decimal, BOM. Texto iniciado por = + - @ tab ou CR recebe apóstrofo, para nunca virar fórmula.
+function csvCell(v,t){if(v==null||v==='')return'';
+  if(t==='n'||t==='i'||t==='p'){if(typeof v!=='number'||!isFinite(v))return'';return String(t==='i'?Math.round(v):+v.toFixed(t==='p'?4:6)).replace('.',',')}
+  let s=t==='d'?fmtDtExp(v):String(v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return/[;"\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function fmtDtExp(v){const d=new Date(v);if(isNaN(d))return String(v);const p=n=>String(n).padStart(2,'0');try{return d.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',','')}catch(_){return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear()+' '+p(d.getHours())+':'+p(d.getMinutes())}}
+function toCsv(tbl){const L=[tbl.cols.map(c=>csvCell(c[0],'s')).join(';')];tbl.rows.forEach(r=>L.push(r.map((v,i)=>csvCell(v,tbl.cols[i][1])).join(';')));return'﻿'+L.join('\r\n')}
+// Planilha (SheetJS): título, cabeçalho, tipos e formatos explícitos. Células nunca recebem fórmula (sem propriedade "f").
+function sheetCells(tbl){const rows=[[{t:'s',v:tbl.title}],[],tbl.cols.map(c=>({t:'s',v:c[0]}))];
+  tbl.rows.forEach(r=>rows.push(r.map((v,i)=>{const t=tbl.cols[i][1];if(v==null||v==='')return null;
+    if(t==='p')return typeof v==='number'&&isFinite(v)?{t:'n',v:v/100,z:'0.0%'}:null;
+    if(t==='n'||t==='i')return typeof v==='number'&&isFinite(v)?{t:'n',v,z:t==='i'?'0':'#,##0.00'}:null;
+    if(t==='d'){const n=xlSerial(v);return n==null?{t:'s',v:String(v)}:{t:'n',v:n,z:'dd/mm/yyyy hh:mm'}}
+    return{t:'s',v:String(v)}})));return rows}
+// Número de data do Excel (dias desde 30/12/1899) no horário de São Paulo
+function xlSerial(v){const d=new Date(v);if(isNaN(d))return null;let P;try{P=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d).map(x=>[x.type,x.value]))}catch(_){return d.getTime()/864e5+25569}
+  return Date.UTC(+P.year,+P.month-1,+P.day,+P.hour%24,+P.minute,+P.second)/864e5+25569}
 /*PURE_END*/
 
 /* ===== 1. DADOS E ESTADO ===== */
@@ -569,14 +662,15 @@ function vConfig(){const t=document.documentElement.dataset.theme,sr=D.sources.m
   return head('Configurações')+`<div class="cfg">`+card('DADOS SALVOS NESTE NAVEGADOR',`<p>Estado: ${tag(PSTATE[persist][0],PSTATE[persist][1])}</p><p>${saved?`Última importação salva: <b>${esc(D.file)}</b> · ${esc(periodo())}${lastImp?' · importada em '+lastImp.toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(', ',' '):''}.`:noDb?'O armazenamento deste navegador não está disponível: as importações valem apenas para a sessão atual.':'Nenhuma importação salva: o painel mostra os dados iniciais.'}</p>`
     +(confirmDel?`<p class="bad2">Apagar a última importação salva deste navegador? Só o registro guardado por este painel é apagado: a planilha original e o HTML publicado não são alterados.</p><button class="btn" data-del="yes">Confirmar exclusão</button> <button class="btn alt" data-del="no">Cancelar</button>`:`<button class="btn alt" data-del="ask" ${noDb?'disabled':''}>Apagar última importação salva deste navegador</button>`)+`<p class="leg" style="margin:6px 0 0">O histórico mensal é mantido ao apagar a última importação.</p>`
     +`<p class="leg" style="margin:10px 0 0"><b>Endereço desta página:</b> ${esc(location.origin&&location.origin!=='null'?location.origin:'arquivo local')} · <b>Armazenamento protegido contra limpeza automática:</b> ${PERSISTENT===true?'sim':PERSISTENT===false?'não solicitado/negado pelo navegador':'não informado'}. Os dados ficam ligados a este endereço: abrir o painel por outro link (por exemplo, um endereço diferente) mostra um histórico vazio.</p><p class="leg" style="margin:10px 0 0">Este navegador guarda apenas uma cópia (cache) da última versão central e das importações locais. A fonte oficial compartilhada é o Supabase (veja o cartão Publicação central); apagar a cópia local não apaga os dados publicados.</p>`)
-  +cardCentral()+card('FONTES DO ARQUIVO',`<div class="sc"><table><tr><th>Aba</th><th>Papel</th><th>Lotes lidos</th><th>Estado</th></tr>${sr}</table></div><p class="leg" style="margin:10px 0 0">CONSOL. traz os indicadores oficiais; as demais abas são fontes de detalhamento e nunca são misturadas sem aviso.</p>`)
+  +cardGestao()+cardCentral()+card('FONTES DO ARQUIVO',`<div class="sc"><table><tr><th>Aba</th><th>Papel</th><th>Lotes lidos</th><th>Estado</th></tr>${sr}</table></div><p class="leg" style="margin:10px 0 0">CONSOL. traz os indicadores oficiais; as demais abas são fontes de detalhamento e nunca são misturadas sem aviso.</p>`)
   +card('ARQUIVOS IMPORTADOS',`${HIST.size?`<div class="sc"><table class="cmp"><tr><th>Período</th><th>Arquivo</th><th>Importado em</th><th>Situação</th><th>Ações</th></tr>${[...histKeys()].reverse().map(k=>{const e=HIST.get(k);return`<tr><td class="l"><b>${esc(keyLabel(k))}</b></td><td class="l">${esc(e.rec.file)}</td><td>${fmtDt(e.rec.savedAt)}</td><td>${k===pkeyOf(D.period)?tag('EXIBIDO','in')+' ':''}${e.central?tag('NO SERVIDOR','ok'):e.pub?tag('PUBLICADO (EMBUTIDO)','ok'):tag('SÓ NESTE NAVEGADOR','er')}</td><td class="l"><button class="btn alt sm" data-hopen="${k}">Abrir</button> ${e.central?'':`<button class="btn alt sm" data-hpub="${k}">Publicar</button> `}<button class="btn bad sm" data-hdel="${k}" aria-label="Excluir ${esc(e.rec.file)}">Excluir</button></td></tr>`}).join('')}</table></div>`:'<p class="empty">Nenhum arquivo importado e arquivado ainda.</p>'}<p class="leg" style="margin:10px 0 0">Escolha o arquivo e clique em Excluir; haverá uma confirmação. Só o registro guardado neste navegador é apagado (a planilha original não muda). Se o arquivo excluído for o da última importação, o painel passa a mostrar o mês arquivado mais recente, ou os dados iniciais se não restar nenhum.</p>`)
   +card('PUBLICAR PARA TODOS — MÉTODO MANUAL ANTIGO (index.html embutido)',`<p><b>Por que os outros veem o resultado antigo?</b> As importações ficam guardadas só no navegador de quem importou. Quem abre o link vê os dados que foram publicados junto com a página.</p><p>Para que todos vejam os meses atuais: clique em <b>Gerar painel para publicar</b>, depois envie o arquivo <b>index.html</b> gerado no lugar do arquivo ftr/index.html do site publicado. Quem abrir o link passa a ver os meses incluídos.</p><p><button class="btn" data-bk="pub" ${HIST.size?'':'disabled'}>Gerar painel para publicar (index.html)</button></p><p class="leg" style="margin:6px 0 0">Gere a partir do endereço publicado (link oficial), não de um arquivo aberto do computador. Se você importou no celular, exporte o backup lá, restaure-o no computador aberto pelo link oficial e gere o painel. Os meses publicados não podem ser apagados daqui: para removê-los, publique uma nova versão sem eles.</p>`)
   +card('HISTÓRICO MENSAL E BACKUP',`<p>Meses arquivados neste navegador: <b>${HIST.size}</b>${HIST.size?' ('+histKeys().map(keyLabel).join(', ')+')':''}. Cada importação válida é arquivada no mês identificado no arquivo.</p><p class="leg">O histórico fica apenas neste navegador e neste dispositivo; não há sincronização entre navegadores. Use o backup para levar os meses a outro navegador ou guardar uma cópia de segurança.</p><p><button class="btn" data-bk="exp" ${HIST.size?'':'disabled'}>⬇ Exportar backup (JSON)</button> <button class="btn alt" data-bk="imp">⬆ Restaurar backup</button></p><p class="leg" style="margin:6px 0 0">A restauração valida o arquivo antes de alterar qualquer dado, mostra os meses encontrados e pede confirmação para qualquer conflito. Nada é apagado automaticamente.</p>`)
   +card('RELATÓRIO E AJUDA',`<p><button class="btn" data-bk="rpt">Gerar relatório PDF</button> <button class="btn alt" data-bk="help">Glossário dos indicadores</button></p><p class="leg">O relatório abre uma prévia e usa a impressão do navegador (“Salvar como PDF”). Respeita os filtros ativos da página.</p>`)
   +card('TEMA',`<p>Escolha a aparência. A escolha fica salva neste navegador e prevalece sobre a preferência do sistema.</p><span class="seg"><button class="chip" data-th="light" aria-pressed="${t==='light'}">☀ Claro</button><button class="chip" data-th="dark" aria-pressed="${t==='dark'}">🌙 Escuro</button></span>`)
   +card('MODO TV',`<p>Apresentação limpa em tela cheia, que alterna entre Visão geral, Desvios, Salas e Mostos, Fermentação e Bright Beer, sempre mostrando a fonte dos dados.</p><p><label>Intervalo <select class="tvint">${[10,20,30,60].map(s=>`<option value="${s}" ${tvSec===s?'selected':''}>${s} s</option>`).join('')}</select></label> <button class="btn alt sm tvrot">Rotação automática: ${tvOn?'ON':'OFF'}</button></p><button class="btn" id="btv2">Ativar TV</button>`)
-  +card('IMPORTAR EXCEL',`<p>Excel oficial → baixar uma cópia → Importar Excel → selecionar a cópia. <b>Um arquivo = um mês.</b> A importação válida é salva neste navegador como a última importação e também arquivada no histórico do mês identificado. Em seguida é publicada no Supabase para todos os usuários (é pedido o login de um usuário autorizado). Reimportar um mês já arquivado pede confirmação antes de substituir.</p><button class="btn" data-imp>⬆ IMPORTAR EXCEL</button>`)
+  +card('IMPORTAR EXCEL',`<p>Excel oficial → baixar uma cópia → Importar Excel → selecionar a cópia. <b>Um arquivo = um mês.</b> Depois da leitura, o painel abre a <b>conferência</b>: período, indicadores, lotes, erros impeditivos, avisos e a comparação com o que já está publicado. Só então você escolhe publicar para todos (com login de um usuário autorizado), salvar só neste navegador ou cancelar sem alterar nada. Cada publicação cria uma nova revisão; as anteriores ficam no histórico de versões.</p><button class="btn" data-imp>⬆ IMPORTAR EXCEL</button>`)
+  +card('EXPORTAR DADOS',`<p>Planilha Excel com indicadores gerais, indicadores por etapa, histórico mensal, lotes analisados, lotes com desvios, parâmetros disponíveis e comparação entre períodos. Lotes e desvios respeitam os filtros ativos de cada etapa.</p><p><button class="btn" data-bk="xlsx">⬇ Exportar Excel</button> <button class="btn alt" data-bk="csv">⬇ Exportar CSV</button></p><p class="leg" style="margin:6px 0 0">Os arquivos não contêm fórmulas: textos que começam com =, +, - ou @ são gravados como texto.</p>`)
   +card('REGRAS DE DADOS',`<ul><li>Limites inclusivos: mínimo ≤ valor ≤ máximo é <b>dentro</b>. Quando a planilha informa só o máximo (ou só o mínimo), vale o limite informado, como nas fórmulas GOOD/WRONG das abas.</li><li>Sem nenhum limite ou sem valor: <b>sem classificação</b>.</li><li>Células com erro de fórmula ou marcadas como não aplicáveis na planilha são ignoradas.</li><li>Alvo, limites, metas e FTR vêm do arquivo importado.</li></ul>`)+'</div>'}
 function lotHtml(i,modal){const l=LOTS[i],G=l.G,R=[...ALL,...FEA,...BBA].filter(r=>r.l===l),nb=R.filter(r=>r.st==='fora').length;
   const stg=r=>r.st==='fora'?tag('FORA · '+(r.dev<0?'abaixo do mínimo':'acima do máximo'),'bad'):r.st==='dentro'?tag('DENTRO','ok'):tag(r.st==='ausente'?'AUSENTE':'SEM LIMITE','na'),cc=r=>({dentro:'i',fora:'o'}[r.st]||'n'),dv=r=>r.st==='fora'?esc(fd(r.dev,r.p)):r.st==='dentro'?'0':'–',pn=r=>esc(r.p.n)+(r.p.ctx?`<br><span class="mut">${esc(r.p.ctx)}</span>`:'');
@@ -605,7 +699,7 @@ const GLOS={
  orig:['Origem dos dados','CONSOL.: indicadores oficiais. BREWHOUSE 1 e BREWHOUSE 3: lotes das Salas 1 e 3. FERMENTHP e FERMENTAMSTELPRAY: detalhe da fermentação, fontes distintas. BRIGHT BEER: detalhe do Bright Beer. Cada tabela indica a aba usada.'],
  rank:['Ranking e Pareto de desvios','O ranking ordena (etapa, fonte, parâmetro) pelo número de leituras fora do limite. No Pareto, as barras são essas ocorrências e a linha é o percentual acumulado sobre o total do ranking. Mostra onde estão os desvios; não indica causas.']};
 const gi=t=>`<button class="gi" data-gl="${t}" aria-label="Ajuda: ${esc(GLOS[t][0])}" title="${esc(GLOS[t][0])}">ⓘ</button>`;
-function dlg(html,btns){return new Promise(res=>{const m=$('dlg'),b=$('db'),prev=document.activeElement;
+function dlg(html,btns,wide){return new Promise(res=>{const m=$('dlg'),b=$('db'),prev=document.activeElement;b.parentElement.classList.toggle('dlgw',!!wide);
   b.innerHTML=html+'<div class="dbtn">'+btns.map(([id,t,c])=>`<button class="btn ${c||''}" data-dr="${id}">${t}</button>`).join('')+'</div>';m.hidden=false;
   const done=v=>{m.hidden=true;m.onclick=null;document.removeEventListener('keydown',kd,true);if(prev&&prev.focus)try{prev.focus()}catch(_){}res(v)};
   const kd=e=>{if(e.key==='Escape'){e.preventDefault();done(null)}};document.addEventListener('keydown',kd,true);
@@ -650,7 +744,7 @@ function vHist(){const ks=histKeys(),selK=HS.sel&&HIST.has(HS.sel)?HS.sel:(ks[ks
   const h=head('Histórico mensal',srcRow('<span class="mut">Meses arquivados neste navegador (um registro por mês) · indicadores oficiais: </span>'+srcSet('',['CONSOL.'])+'<span class="mut"> · lotes e ocorrências: recalculado a partir das abas de detalhe</span>'));
   if(!ks.length)return h+card('MESES ARQUIVADOS',emptyP('Nenhum mês arquivado ainda. Cada importação válida de um arquivo mensal é arquivada automaticamente, no período identificado no arquivo. Importe o Excel para criar o primeiro registro.'),null,srcRow(''));
   const S=ks.map(sumOf),cats=ks.map(k=>({k,l:keyShort(k)}));
-  const rows=[...ks].reverse().map(k=>{const s=sumOf(k),e=HIST.get(k);return`<tr class="cl${k===selK?' sel':''}" data-hm="${k}"><td class="l"><b>${esc(keyLabel(k))}</b>${k===dispK?' '+tag('EXIBIDO','in'):''}</td><td class="l">${esc(e.rec.file)}</td><td>${fmtDt(e.rec.savedAt)}</td><td>${pc(s.ftrGeral)}</td><td>${pc(s.meta)}</td>${STG.map(([sk])=>`<td>${pc(s.stages[sk].off)}</td>`).join('')}<td class="${s.tot.lotsBad?'o':''}">${s.tot.lotsBad}</td><td class="${s.tot.fora?'o':''}">${s.tot.fora}</td><td class="l"><button class="btn alt sm" data-hopen="${k}">Abrir</button> <button class="btn alt sm" data-hdel="${k}" aria-label="Excluir ${esc(keyLabel(k))} do histórico">Excluir</button></td></tr>`}).join('');
+  const rows=[...ks].reverse().map(k=>{const s=sumOf(k),e=HIST.get(k);return`<tr class="cl${k===selK?' sel':''}" data-hm="${k}"><td class="l"><b>${esc(keyLabel(k))}</b>${k===dispK?' '+tag('EXIBIDO','in'):''}</td><td class="l">${esc(e.rec.file)}</td><td>${fmtDt(e.rec.savedAt)}</td><td>${pc(s.ftrGeral)}</td><td>${pc(s.meta)}</td>${STG.map(([sk])=>`<td>${pc(s.stages[sk].off)}</td>`).join('')}<td class="${s.tot.lotsBad?'o':''}">${s.tot.lotsBad}</td><td class="${s.tot.fora?'o':''}">${s.tot.fora}</td><td class="l"><button class="btn alt sm" data-hopen="${k}">Abrir</button> ${e.central?`<button class="btn alt sm" data-vers="${k}">Versões</button> `:''}<button class="btn alt sm" data-hdel="${k}" aria-label="Excluir ${esc(keyLabel(k))} do histórico">Excluir</button></td></tr>`}).join('');
   const sel=`<div class="fr" style="margin-bottom:12px"><label>Mês <select id="hsel">${[...ks].reverse().map(k=>`<option value="${k}" ${k===selK?'selected':''}>${esc(keyLabel(k))}</option>`).join('')}</select></label><button class="btn sm" data-hopen="${selK}">Abrir mês selecionado</button>${viewKey?'<button class="btn alt sm" data-back>Voltar à última importação</button>':''}</div>`;
   const i=ks.indexOf(selK),prev=i>0?ks[i-1]:null,s=sumOf(selK),p=prev?sumOf(prev):null,gap=s.ftrGeral!=null&&s.meta!=null?s.ftrGeral-s.meta:null,vr=p&&s.ftrGeral!=null&&p.ftrGeral!=null?s.ftrGeral-p.ftrGeral:null;
   const det=`<div class="gk">${kb('FTR geral · '+esc(keyLabel(selK)),pc(s.ftrGeral),gap==null?'':gap>=0?'grn':'red','oficial · '+fonte(['CONSOL.']),GLOS.ftrg[1],'sm')}${kb('Meta',pc(s.meta),'','oficial · '+fonte(['CONSOL.']),GLOS.meta[1],'sm')}${kb('Gap para a meta',gap==null?'–':ppx(gap),gap==null?'nab':gap>=0?'grn':'red','FTR geral − meta',GLOS.pp[1],'sm')}${kb('Variação vs mês anterior',prev?ppx(vr):'–',vr==null?'nab':dcls(vr),prev?'em p.p. · anterior: '+esc(keyLabel(prev)):'sem mês anterior arquivado',GLOS.pp[1],'sm')}${kb('Lotes fora',s.tot.lotsBad,s.tot.lotsBad?'red':'grn','de '+s.tot.lots+' avaliados (soma das 3 etapas)',GLOS.lotes[1],'sm')}${kb('Parâmetros fora',s.tot.fora,s.tot.fora?'red':'grn','ocorrências (soma das 3 etapas)',GLOS.lotes[1],'sm')}</div>`;
@@ -847,7 +941,7 @@ function render(){
 }
 
 /* ===== 6. EVENTOS ===== */
-const SEL='[data-del],[data-lot],[data-par],[data-sala],[data-mst],[data-rkm],[data-rks],[data-p],[data-rm],[data-t],[data-th],[data-imp],[data-tvn],[data-pg],[data-sel],[data-src],[data-gl],[data-dv],[data-hm],[data-hopen],[data-hdel],[data-hpub],[data-sync],[data-login],[data-logout],[data-pubpend],[data-discard],[data-back],[data-bk],#brpt,#bhelp,#rprint,#rclose,#cpc,#dsc,#fc,#exp,#tvx,#btv,#btv2,.tvrot,#menu,#ov';
+const SEL='[data-del],[data-lot],[data-par],[data-sala],[data-mst],[data-rkm],[data-rks],[data-p],[data-rm],[data-t],[data-th],[data-imp],[data-tvn],[data-pg],[data-sel],[data-src],[data-gl],[data-dv],[data-hm],[data-hopen],[data-hdel],[data-hpub],[data-sync],[data-login],[data-logout],[data-pubpend],[data-discard],[data-back],[data-bk],[data-vers],[data-vload],#brpt,#bhelp,#rprint,#rclose,#cpc,#dsc,#fc,#exp,#tvx,#btv,#btv2,.tvrot,#menu,#ov';
 document.addEventListener('click',e=>{if(!ready)return;F=FA[pkey()];
   if(openDD&&!e.target.closest('.dd')){openDD=null;render()}
   const t=e.target.closest(SEL);if(!t)return;const d=t.dataset;
@@ -879,7 +973,9 @@ document.addEventListener('click',e=>{if(!ready)return;F=FA[pkey()];
   else if(d.pubpend!=null){publishPending();return}
   else if(d.discard!=null){discardPending();return}
   else if(d.back!=null){backCurrent();return}
-  else if(d.bk!=null){if(d.bk==='exp')exportBackup();else if(d.bk==='pub')exportPub();else if(d.bk==='rpt')openReport();else if(d.bk==='help')openGl('all');else $('fbk').click();return}
+  else if(d.vers!=null){openVersions(d.vers||null);return}
+  else if(d.vload!=null){loadVMeta();return}
+  else if(d.bk!=null){if(d.bk==='exp')exportBackup();else if(d.bk==='pub')exportPub();else if(d.bk==='rpt')openReport();else if(d.bk==='help')openGl('all');else if(d.bk==='xlsx')exportXlsx();else if(d.bk==='csv')exportCsvMenu();else if(d.bk==='sbk')exportServerBackup();else if(d.bk==='sbkchk')$('fsbk').click();else $('fbk').click();return}
   else if(t.id==='brpt'){openReport();return}
   else if(t.id==='bhelp'){openGl('all');return}
   else if(t.id==='rprint'){window.print();return}
@@ -927,7 +1023,8 @@ const dbGetK=id=>dbTx('readonly',(st,set)=>{const r=st.get(id);r.onsuccess=()=>s
 const dbGet=()=>dbGetK('last');
 const dbAllHist=()=>dbTx('readonly',(st,set)=>{const r=st.getAll();r.onsuccess=()=>set((r.result||[]).filter(x=>x&&/^hist:/.test(String(x.id))))});
 function fnv(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)}return(h>>>0).toString(16)}
-const jsonOf=d=>JSON.stringify(d,(k,v)=>k==='G'||k==='i'?undefined:v);
+// 'qv' (contagem de valores inválidos da importação) é diagnóstico local: não entra no JSON salvo/publicado nem no checksum
+const jsonOf=d=>JSON.stringify(d,(k,v)=>k==='G'||k==='i'||k==='qv'?undefined:v);
 function mkRecs(d,when,key,extra){const json=jsonOf(d),b={formatVersion:FMT,appSchema:'ftr-painel',savedAt:when.toISOString(),file:d.file,period:d.period,checksum:fnv(json),dataJson:json,...(extra||{})};return{last:{id:'last',...b},hist:key?{id:'hist:'+key,key,...b}:null}}
 // grava a "última importação" e o registro do mês na MESMA transação: ou grava os dois, ou nenhum
 async function saveImport(d,when,key){const r=mkRecs(d,when,key);await dbTx('readwrite',st=>{st.put(r.last);if(r.hist)st.put(r.hist)})}
@@ -941,6 +1038,36 @@ function validateRecord(rec,hist){try{
   const d=JSON.parse(rec.dataJson),e=validateData(d);if(e)return{ok:false,reason:e};
   if(hist){const k=pkeyOf(d.period);if(!k||rec.id!=='hist:'+k)return{ok:false,reason:'o período dos dados não confere com o mês do registro'}}
   return{ok:true,data:d}}catch(e){return{ok:false,reason:'registro ilegível ('+e.message+')'}}}
+/*PURE2_START*/
+// ---- Backup COMPLETO do servidor (todas as versões publicadas). "integrity" = FNV-1a do dataJson exportado:
+// detecta arquivo corrompido ou editado; o "checksum" original de cada publicação é guardado como metadado.
+const SBK_FMT='ftr-painel-server-backup';
+function buildServerBackup(r){return{format:SBK_FMT,version:1,dataFormat:FMT,exportedAt:r.exportedAt,exportedBy:r.exportedBy,current:r.current||null,
+  months:(r.months||[]).map(m=>({key:m.period_key,revision:m.revision,checksum:m.checksum,file:m.file_name,publishedAt:m.published_at})),
+  publications:(r.publications||[]).map(p=>({id:p.id,key:p.period_key,revision:p.revision,file:p.file_name,checksum:p.checksum,publishedBy:p.published_by,publishedAt:p.published_at,setCurrent:p.set_current,replaced:p.replaced,action:p.action||'publish',restoredFromRevision:p.restored_from_revision??null})),
+  versions:(r.versions||[]).map(v=>{const dataJson=JSON.stringify(v.data);return{key:v.period_key,revision:v.revision,file:v.file_name,checksum:v.checksum,publishedBy:v.published_by,publishedAt:v.published_at,action:v.action,restoredFromRevision:v.restored_from_revision??null,setCurrent:v.set_current,integrity:fnv(dataJson),dataJson}})}}
+// Valida um backup do servidor SEM gravar nada. P = problemas impeditivos, W = avisos, V = versões válidas (com os dados).
+function checkServerBackup(o){const P=[],W=[],V=[];
+  if(!o||typeof o!=='object'||Array.isArray(o)){P.push('o conteúdo não é um backup do servidor');return{P,W,V}}
+  if(o.format!==SBK_FMT)P.push('formato desconhecido (esperado "'+SBK_FMT+'")');
+  if(o.version!==1)P.push('versão do backup não suportada: '+String(o.version));
+  if(o.dataFormat!==FMT)P.push('formato interno dos dados diferente ('+String(o.dataFormat)+'; esperado '+FMT+')');
+  if(!Array.isArray(o.versions)||!o.versions.length){P.push('o backup não contém versões');return{P,W,V}}
+  const seen=new Set();
+  o.versions.forEach((v,i)=>{const id='versão #'+(i+1);
+    if(!v||typeof v.key!=='string'||!/^\d{4}-(0[1-9]|1[0-2])$/.test(v.key)){P.push(id+': período inválido');return}
+    if(!Number.isInteger(v.revision)||v.revision<1){P.push(keyLabel(v.key)+': revisão inválida');return}
+    const k=v.key+'|'+v.revision;if(seen.has(k)){P.push(keyLabel(v.key)+' r'+v.revision+': repetida no arquivo');return}seen.add(k);
+    if(typeof v.dataJson!=='string'||fnv(v.dataJson)!==v.integrity){P.push(keyLabel(v.key)+' r'+v.revision+': verificação de integridade falhou');return}
+    let d;try{d=JSON.parse(v.dataJson)}catch(_){P.push(keyLabel(v.key)+' r'+v.revision+': dados ilegíveis');return}
+    const er=validateData(d);if(er){P.push(keyLabel(v.key)+' r'+v.revision+': '+er);return}
+    if(pkeyOf(d.period)!==v.key){P.push(keyLabel(v.key)+' r'+v.revision+': o período dos dados não confere');return}
+    if(!['publish','restore','backfill'].includes(v.action))W.push(keyLabel(v.key)+' r'+v.revision+': tipo de operação desconhecido ('+String(v.action)+')');
+    V.push({...v,d})});
+  (Array.isArray(o.months)?o.months:[]).forEach(m=>{if(!V.some(v=>v.key===m.key&&v.revision===m.revision))W.push(keyLabel(m.key)+': a revisão vigente r'+m.revision+' não está entre as versões válidas do backup')});
+  if(o.current&&!(o.months||[]).some(m=>m.key===o.current.period_key))W.push('a versão corrente ('+String(o.current.period_key)+') não aparece na lista de meses');
+  return{P,W,V}}
+/*PURE2_END*/
 
 /* --- histórico em memória e ações --- */
 const HIST=new Map();let CURD=null,viewKey=null,HS={sel:null},CS={a:'',b:'',src:'',mosto:'',param:''},DS={m:'',e:'',f:''},LASTATT=null;
@@ -1088,11 +1215,15 @@ $('fimp').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f||
     if(!d.period)w.push(['amb','⚠ Período não identificado no arquivo.']);
     if(c.div)w.push(['amb','⚠ '+c.div+' leitura(s) com classificação diferente da coluna GOOD/WRONG da planilha.']);
     if(bad)w.push(['amb','⚠ Conferência com a CONSOL.: '+bad+' indicador(es) divergente(s). Veja a tabela de conferência na página Qualidade.']);
-    const key=pkeyOf(d.period),ex=key?HIST.get(key):null;
+    const key=pkeyOf(d.period),ex=key?HIST.get(key):null,ck=fnv(jsonOf(d)),rm=key?REMOTE_META.get(key):null;
     if(!key)w.push(['amb','⚠ Período não identificado: a importação foi salva como última importação, mas não foi arquivada no histórico mensal.']);
-    if(ex){const ans=await dlg(`<h3>Este mês já está arquivado</h3><p>Já existe um registro para <b>${esc(keyLabel(key))}</b>:</p><p>Arquivo existente: <b>${esc(ex.rec.file)}</b><br>Importado em: ${fmtDt(ex.rec.savedAt)}</p><p>Novo arquivo: <b>${esc(f.name)}</b>. Deseja substituir o registro existente? Se cancelar, o histórico e a última importação válida permanecem como estão.</p>`,[['sub','Substituir registro existente','bad'],['can','Cancelar','alt']]);
-      if(ans!=='sub'){dg.proc=['ok','concluído, mas não aplicado'];dg.save=['na','não executado — substituição cancelada pelo usuário'];att('cancelada pelo usuário');
-        impBox('warn','⚠ Importação cancelada',null,f.name,[['',`O arquivo foi lido e validado, mas ${esc(keyLabel(key))} já estava arquivado e você optou por não substituir. Nenhum dado foi alterado: o histórico e a última importação válida foram mantidos.`]],dg);return}}
+    // CONFERÊNCIA: prévia, erros impeditivos x avisos e comparação com a publicação vigente, antes de qualquer gravação
+    const published=rm?{revision:rm.revision,checksum:rm.checksum,publishedAt:rm.published_at,file:rm.file_name,sum:ex&&ex.central&&ex.rc===rm.checksum?ex.sum:null}:null;
+    const rv=reviewImport(d,{file:f.name,ignoredSheets:dg.ignored,chk:c,validate:validateData,checksum:ck,published});
+    const att2=res=>{att(res);LASTATT.rv={e:rv.errors.length,w:rv.warnings.length}};
+    const ans=await reviewDlg(d,rv,{published,local:ex&&!ex.central&&!ex.pub?{file:ex.rec.file,savedAt:ex.rec.savedAt}:null,offline:PUBINFO.status==='erro'});
+    if(ans!=='pub'&&ans!=='loc'){dg.proc=['ok','concluído e conferido, mas não aplicado'];dg.save=['na','não executado — cancelado na conferência'];att2('conferida e cancelada');
+      impBox('warn','⚠ Importação conferida e cancelada',null,f.name,[['','O arquivo foi lido e conferido, mas você optou por não aplicar. Nenhum dado foi alterado: o painel, o histórico e a publicação central continuam como estavam.']],dg);return}
     // salva e CONFIRMA lendo de volta (última importação + registro do mês, na mesma transação) antes de declarar sucesso
     const when=new Date();let saveErr=null;
     try{await saveImport(d,when,key);const rb=await dbGet(),v=validateRecord(rb);if(!v.ok||v.data.file!==d.file||v.data.lots.length!==d.lots.length||v.data.fe.lots.length!==d.fe.lots.length)throw new Error('o registro gravado não passou na verificação ('+(v.reason||'dados diferentes')+')');
@@ -1101,12 +1232,15 @@ $('fimp').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f||
     const old=CURD&&CURD.period;useCurrent(d);imported=true;lastImp=when;persist=saveErr?'unavailable':'saved';page=0;
     if(!saveErr&&key)HIST.set(key,histEntry(key,d,d.file,when.toISOString()));
     render();
-    const pr=await publishData(d,key,f.name,true);
-    if(pr.ok){dg.pub=['ok','publicado no Supabase em '+fmtDt(pr.publishedAt)+(pr.replaced?' (substituiu a publicação anterior deste mês)':'')+'; versão corrente de todos atualizada'];w.push(['','✓ Publicado para todos os usuários em '+esc(fmtDt(pr.publishedAt))+'.'])}
-    else{dg.pub=['erro','não publicado — '+pr.reason+(pr.details?' ('+pr.details.join('; ')+')':'')+'. A versão central anterior foi preservada.'];w.push(['amb','⚠ NÃO publicado: '+esc(pr.reason)+(pr.details?' — '+pr.details.map(esc).join('; '):'')+'. Os demais usuários continuam vendo a versão publicada anterior. Esta importação fica só neste navegador até ser publicada.']);
-      if(key){setPend({key,file:f.name,savedAt:when.toISOString()});if(!saveErr)persist='pendente'}}
-    const al=w.some(x=>x[0]==='amb'),ttl=!pr.ok?'⚠ Importação validada, mas NÃO publicada no servidor':saveErr?'⚠ Importação publicada, mas não salva neste navegador':al?'⚠ Importação publicada para todos, com alertas.':'<span class="grn">✓ Importação concluída e publicada para todos.</span>';
-    att(saveErr?'concluída apenas na sessão (não salva)':'concluída e salva'+(key?' · '+keyLabel(key):''));impBox(saveErr||al?'warn':'',ttl,d,f.name,w,dg);render()}
+    let pr={ok:false,skipped:true,reason:'não solicitada'};
+    if(ans==='pub')pr=await publishData(d,key,f.name,true,published?published.revision:0);
+    if(pr.ok){dg.pub=['ok','publicado no Supabase como revisão '+pr.revision+' em '+fmtDt(pr.publishedAt)+(pr.replaced?' (a revisão anterior continua no histórico de versões)':'')+'; versão corrente de todos atualizada'];w.push(['','✓ Publicado para todos os usuários como revisão '+pr.revision+' em '+esc(fmtDt(pr.publishedAt))+'.'])}
+    else if(pr.skipped){dg.pub=['na','não publicado — você escolheu salvar só neste navegador'];w.push(['amb','⚠ Salvo só neste navegador. Os demais usuários continuam vendo a versão publicada. Use “Publicar agora” na faixa de aviso quando quiser publicar.']);
+      if(key&&!rv.identical){setPend({key,file:f.name,savedAt:when.toISOString()});if(!saveErr)persist='pendente'}}
+    else{dg.pub=['erro','não publicado — '+pubMsg(pr)+' A versão central anterior foi preservada.'];w.push(['amb','⚠ NÃO publicado: '+esc(pubMsg(pr))+' Os demais usuários continuam vendo a versão publicada anterior.']);
+      if(key&&pr.code!=='conteudo_identico'){setPend({key,file:f.name,savedAt:when.toISOString()});if(!saveErr)persist='pendente'}}
+    const al=w.some(x=>x[0]==='amb'),ttl=pr.skipped?'⚠ Importação conferida e salva só neste navegador':!pr.ok?'⚠ Importação validada, mas NÃO publicada no servidor':saveErr?'⚠ Importação publicada, mas não salva neste navegador':al?'⚠ Importação publicada para todos, com alertas.':'<span class="grn">✓ Importação conferida e publicada para todos.</span>';
+    att2(saveErr?'concluída apenas na sessão (não salva)':(pr.ok?'publicada (r'+pr.revision+')':'salva sem publicar')+(key?' · '+keyLabel(key):''));impBox(saveErr||al?'warn':'',ttl,d,f.name,w,dg);render()}
   catch(err){if(!dg.proc)dg.proc=['erro','falhou — '+err.message];dg.save=['na','não executado — nada foi alterado'];att('falhou');
     impBox('err','<span class="red">✕ Falha na importação</span>',null,f.name,[['bad','Importação não concluída. Os dados atuais e a última importação salva foram mantidos.'],['',esc('Motivo: '+err.message)]],dg)}};
 
@@ -1114,7 +1248,7 @@ $('fimp').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f||
 // Leitura: direto do Supabase com a chave pública (RLS só permite SELECT nas 2 tabelas do painel).
 // Escrita: somente pela função do servidor, que valida o login no servidor. O navegador nunca grava no banco.
 const SB_URL='https://krscjbdphymgzjteclif.supabase.co',SB_KEY='sb_publishable_HSW-mqcJySZAo4GnnQ6U1A_l4K4I0qv',FN_PUB=SB_URL+'/functions/v1/painel-publish',AUTH_K='ftr-auth',PEND_K='ftr-pending-pub';
-let CFG=null,syncing=false,REMOTE_KEYS=new Set(),AM=null,LASTEMAIL='';
+let CFG=null,syncing=false,REMOTE_KEYS=new Set(),REMOTE_META=new Map(),AM=null,LASTEMAIL='';
 const PUBINFO={status:'idle',at:null,file:'',key:'',msg:''};
 const pubLabel=()=>PUBINFO.status==='ok'&&PUBINFO.at?esc(fmtDt(PUBINFO.at)):PUBINFO.status==='loading'?'<span class="mut">consultando o servidor…</span>':PUBINFO.status==='erro'?'<span class="red">sem conexão com o servidor</span>':PUBINFO.status==='vazio'?'<span class="mut">nenhuma publicação ainda</span>':'<span class="mut">—</span>';
 const getPend=()=>{try{return JSON.parse(localStorage.getItem(PEND_K)||'null')}catch(_){return null}};
@@ -1152,11 +1286,12 @@ function afterPublish(key,d,res,file){const at=res.publishedAt||new Date().toISO
   e.central=true;e.rc=res.checksum;e.pub=false;e.rec={key,file,savedAt:at};
   const p=getPend();if(p&&p.key===key&&res.currentSet)setPend(null);
   const puts=[];try{const r=mkRecs(d,new Date(at),key,{remoteChecksum:res.checksum});puts.push(r.hist);if(res.currentSet)puts.push(r.last)}catch(_){}
+  if(res.revision)REMOTE_META.set(key,{period_key:key,revision:res.revision,checksum:res.checksum,published_at:at,file_name:file});REMOTE_KEYS.add(key);VMETA=null;
   if(res.currentSet){Object.assign(PUBINFO,{status:'ok',at,file,key,msg:''});persist='central';lastImp=new Date(at);imported=true}
   dbTx('readwrite',st=>{puts.forEach(x=>x&&st.put(x))}).catch(()=>{})}
-async function publishData(d,key,file,setCurrent){
+async function publishData(d,key,file,setCurrent,expected){
   if(!key)return{ok:false,reason:'período não identificado no arquivo: não é possível publicar'};
-  let json,body;try{json=jsonOf(d);body=JSON.stringify({file,periodKey:key,checksum:fnv(json),dataJson:json,setCurrent:setCurrent!==false})}catch(e){return{ok:false,reason:'dados não serializáveis ('+e.message+')'}}
+  let json,body;try{json=jsonOf(d);body=JSON.stringify({file,periodKey:key,checksum:fnv(json),dataJson:json,setCurrent:setCurrent!==false,...(expected!=null?{expectedRevision:expected}:{})})}catch(e){return{ok:false,reason:'dados não serializáveis ('+e.message+')'}}
   for(let t=0;t<2;t++){
     let tok;try{tok=await ensureLogin()}catch(e){return{ok:false,reason:e.message||String(e)}}
     if(!tok)return{ok:false,reason:'login não realizado (cancelado)',cancelled:true};
@@ -1164,13 +1299,16 @@ async function publishData(d,key,file,setCurrent){
     const j=await r.json().catch(()=>null);
     if(r.status===401&&t===0){clearAuth();continue}
     if(r.ok&&j&&j.ok){afterPublish(key,d,j,file);return{ok:true,...j}}
-    return{ok:false,reason:(j&&j.error)||('HTTP '+r.status),details:j&&j.details,status:r.status}}
+    // recusa por publicação concorrente: atualiza a situação do servidor para que o painel mostre a revisão real
+    if(j&&j.code==='revisao_alterada')setTimeout(()=>syncRemote({silent:true}),0);
+    return{ok:false,reason:(j&&j.error)||('HTTP '+r.status),details:j&&j.details,status:r.status,code:j&&j.code,currentRevision:j&&j.currentRevision}}
   return{ok:false,reason:'autenticação recusada pelo servidor'}}
-async function pubMonth(k){const e=HIST.get(k);if(!e)return;
-  const a=await dlg(`<h3>Publicar ${esc(keyLabel(k))} no servidor?</h3><p>O mês (arquivo <b>${esc(e.rec.file)}</b>) entra no histórico central e fica visível para todos. Se já existir uma publicação deste mês, ela será substituída. A versão corrente exibida para todos não muda.</p>`,[['ok','Publicar',''],['x','Cancelar','alt']]);if(a!=='ok')return;
-  const r=await publishData(e.d,k,e.rec.file,false);render();say(r.ok?keyLabel(k)+' publicado no servidor.':'Não publicado: '+r.reason+(r.details?' — '+r.details.join('; '):''))}
-async function publishPending(){const p=getPend(),e=p&&HIST.get(p.key);if(!e){setPend(null);render();return}
-  const r=await publishData(e.d,p.key,e.rec.file,true);render();say(r.ok?'Importação publicada para todos.':'Não publicado: '+r.reason+(r.details?' — '+r.details.join('; '):''))}
+async function pubMonth(k){const e=HIST.get(k);if(!e)return;const rm=REMOTE_META.get(k);
+  const a=await dlg(`<h3>Publicar ${esc(keyLabel(k))} no servidor?</h3><p>O mês (arquivo <b>${esc(e.rec.file)}</b>) entra no histórico central e fica visível para todos${rm?` como <b>revisão ${rm.revision+1}</b>. A revisão ${rm.revision} publicada hoje continua guardada no histórico de versões`:' como revisão 1'}. A versão corrente exibida para todos não muda.</p>`,[['ok',rm?'Publicar revisão '+(rm.revision+1):'Publicar',''],['x','Cancelar','alt']]);if(a!=='ok')return;
+  const r=await publishData(e.d,k,e.rec.file,false,rm?rm.revision:0);render();say(r.ok?keyLabel(k)+' publicado no servidor (revisão '+r.revision+').':'Não publicado: '+pubMsg(r))}
+async function publishPending(){const p=getPend(),e=p&&HIST.get(p.key);if(!e){setPend(null);render();return}const rm=REMOTE_META.get(p.key);
+  if(rm){const a=await dlg(`<h3>Publicar ${esc(keyLabel(p.key))} como revisão ${rm.revision+1}?</h3><p>Este mês já está publicado na revisão ${rm.revision} (${esc(rm.file_name)}, ${esc(fmtDt(rm.published_at))}). A nova revisão substitui o que todos veem; a revisão ${rm.revision} continua no histórico de versões.</p>`,[['ok','Publicar revisão '+(rm.revision+1),''],['x','Cancelar','alt']]);if(a!=='ok')return}
+  const r=await publishData(e.d,p.key,e.rec.file,true,rm?rm.revision:0);if(!r.ok&&r.code==='conteudo_identico')setPend(null);render();say(r.ok?'Importação publicada para todos (revisão '+r.revision+').':'Não publicado: '+pubMsg(r))}
 async function discardPending(){const p=getPend();if(!p)return;
   const a=await dlg(`<h3>Descartar a importação não publicada?</h3><p>A importação local de <b>${esc(keyLabel(p.key))}</b> será descartada e o painel volta à versão publicada no servidor. A planilha original não é alterada.</p>`,[['ok','Descartar','bad'],['x','Cancelar','alt']]);if(a!=='ok')return;
   setPend(null);
@@ -1184,7 +1322,7 @@ async function syncRemote(o){o=o||{};if(syncing||!ready)return;syncing=true;cons
   try{
     const c=await getCfg();
     const[cur,list]=await Promise.all([sbGet(c,'painel_current?select=period_key,file_name,checksum,published_at&id=eq.1'),sbGet(c,'painel_months?select=period_key,file_name,checksum,published_at,revision&order=period_key.asc')]);
-    REMOTE_KEYS=new Set(list.map(m=>m.period_key));
+    REMOTE_KEYS=new Set(list.map(m=>m.period_key));REMOTE_META=new Map(list.map(m=>[m.period_key,m]));
     const pend=getPend(),puts=[],bad=[];
     for(const m of list){
       if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(m.period_key))continue;
@@ -1218,6 +1356,152 @@ function cardCentral(){const a=getAuth(),p=getPend(),nl=[...HIST.values()].filte
   return card('PUBLICAÇÃO CENTRAL (SUPABASE)',`<p>Fonte oficial compartilhada: ${tag(st[0],st[1])}</p><p>Última publicação: <b>${PUBINFO.at?esc(fmtDt(PUBINFO.at)):'—'}</b>${PUBINFO.file?' · arquivo <b>'+esc(PUBINFO.file)+'</b>':''}${PUBINFO.key?' · '+esc(keyLabel(PUBINFO.key)):''}</p>${PUBINFO.msg?`<p class="${PUBINFO.status==='erro'?'bad2':'mut'}">${esc(PUBINFO.msg)}</p>`:''}<p>Quem abre o link vê a última importação publicada, sem importar nada e sem login. Só usuários autorizados publicam: o login é validado no servidor (função do servidor) e o navegador nunca grava direto no banco.</p><p>Sessão de publicação: ${a?`<b>${esc(a.email||'ativa')}</b>`:'<span class="mut">não iniciada</span>'}</p><p><button class="btn alt" data-sync="1">⟳ Atualizar do servidor</button> ${a?'<button class="btn alt" data-logout="1">Sair da sessão de publicação</button>':'<button class="btn alt" data-login="1">Entrar para publicar</button>'}</p>${p?`<p class="bad2">Importação de ${esc(keyLabel(p.key))} ainda não publicada.</p>`:''}${nl?`<p class="leg">${nl} mês(es) só neste navegador. Use “Publicar” na tabela Arquivos importados: cada um entra no histórico central sem trocar a versão corrente.</p>`:''}`)}
 // atualização periódica (inclui o Modo TV): só troca os dados se a versão central mudou
 setInterval(()=>{if(ready&&!document.hidden&&$('dlg').hidden)syncRemote({silent:true})},300000);
+
+/* ===== 7d. OPERAÇÕES PROTEGIDAS: conferência, versões, recuperação, backup do servidor e exportações ===== */
+// Chamada autenticada à função do servidor (mesmo login e mesma renovação de sessão da publicação)
+async function edgeCall(body){
+  for(let t=0;t<2;t++){
+    let tok;try{tok=await ensureLogin()}catch(e){return{ok:false,reason:e.message||String(e)}}
+    if(!tok)return{ok:false,reason:'login não realizado (cancelado)',cancelled:true};
+    let r;try{r=await fetch(FN_PUB,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body)})}catch(e){return{ok:false,reason:'sem conexão com o servidor ('+(e.message||e.name)+')'}}
+    const j=await r.json().catch(()=>null);
+    if(r.status===401&&t===0){clearAuth();continue}
+    if(r.ok&&j&&j.ok)return{ok:true,j};
+    return{ok:false,status:r.status,code:j&&j.code,reason:(j&&j.error)||('HTTP '+r.status),details:j&&j.details,j}}
+  return{ok:false,reason:'autenticação recusada pelo servidor'}}
+const revTag=n=>n?tag('r'+n,'in'):'<span class="mut">—</span>';
+const ACT={publish:'Publicação',restore:'Recuperação',backfill:'Versão vigente na ativação do histórico'};
+let VMETA=null; // cache da lista de versões (metadados; carregada só por publicadores autorizados)
+const lastPubOf=k=>{if(!VMETA)return null;const v=VMETA.versions.filter(x=>!k||x.period_key===k).sort((a,b)=>String(b.published_at).localeCompare(String(a.published_at)))[0];return v||null};
+async function loadVMeta(){const r=await edgeCall({action:'versions'});if(r.ok){VMETA={...r.j,at:new Date()};render();return true}
+  say(r.code==='migracao_pendente'?r.reason:'Não foi possível carregar o histórico de versões: '+r.reason);return false}
+
+/* --- conferência antes de publicar --- */
+function statusStrip(key,P,next){const cur=PUBINFO.key,cm=cur?REMOTE_META.get(cur):null;
+  return`<div class="ig rvg">${[['Mês importado',`<b>${esc(keyLabel(key))}</b>`],['Publicado deste mês',P?`${revTag(P.revision)} em ${esc(fmtDt(P.publishedAt))} · ${esc(P.file)}`:'<span class="mut">ainda não publicado no servidor</span>'],
+    ['Próxima revisão',key?revTag(next):'—'],['Versão corrente (todos)',cur?`${esc(keyLabel(cur))} ${cm?revTag(cm.revision):''}${PUBINFO.at?' · '+esc(fmtDt(PUBINFO.at)):''}`:'<span class="mut">—</span>']].map(([a,b])=>`<b>${a}</b><span>${b}</span>`).join('')}</div>`}
+function diffTable(diff,la,lb){if(!diff)return'';const ch=diff.filter(x=>x.changed),rows=(ch.length?ch:diff).map(x=>{const f=v=>v==null?'–':x.t==='p'?pc(v):nf(v,0),dd=x.d==null?'–':(x.d>0?'+':'')+(x.t==='p'?nf(x.d)+' p.p.':nf(x.d,0));
+  return`<tr${x.changed?' class="rvch"':''}><td class="l">${esc(x.l)}</td><td>${f(x.a)}</td><td>${f(x.b)}</td><td>${dd}</td></tr>`}).join('');
+  return`<div class="sc"><table class="cmp"><tr><th>Indicador</th><th>${esc(la)}</th><th>${esc(lb)}</th><th>Diferença</th></tr>${rows}</table></div><p class="leg" style="margin:6px 0 0">${ch.length?ch.length+' indicador(es) mudaram (em destaque).':'Nenhum indicador resumido mudou.'} p.p. = pontos percentuais.</p>`}
+function reviewHtml(d,rv,o){const s=rv.stats,P=o.published,lst=(L,c)=>L.length?`<ul class="rvl ${c}">${L.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:'';
+  const k=(l,v,sub)=>`<div class="rvk"><span>${l}</span><b>${v}</b>${sub?'<em>'+sub+'</em>':''}</div>`;
+  return`<h3>Conferência antes de publicar · ${esc(keyLabel(rv.key))}</h3>${statusStrip(rv.key,P,rv.nextRevision)}
+  <p class="mut" style="margin:8px 0">Arquivo <b>${esc(s.file)}</b> · lido em ${esc(fmtDt(new Date().toISOString()))} · abas reconhecidas: ${s.sheets.map(esc).join(', ')||'—'}</p>
+  <div class="rvks">${k('FTR geral',pc(s.ftrGeral),'meta '+pc(s.meta))}${STG.map(([sk,n])=>k('FTR '+n,pc(s.stages[sk].off),'recalculado '+pc(s.stages[sk].rec))).join('')}${k('Lotes analisados',s.lotsRead,s.lotsEval+' avaliados')}${k('Registros válidos',s.valid,'leituras classificadas')}${k('Desvios',s.fora,s.lotsBad+' lote(s) com desvio')}</div>
+  ${rv.errors.length?`<p class="bad2" style="margin:12px 0 4px">✕ Erros impeditivos (${rv.errors.length}): a publicação não é possível</p>${lst(rv.errors,'e')}`:'<p class="grn" style="margin:12px 0 4px">✓ Nenhum erro impeditivo</p>'}
+  ${rv.warnings.length?`<p class="ambt" style="margin:10px 0 4px">⚠ Avisos (${rv.warnings.length}): confira antes de publicar</p>${lst(rv.warnings,'w')}`:'<p class="mut" style="margin:10px 0 4px">Nenhum aviso.</p>'}
+  ${rv.info.length?`<details class="rvd"><summary>Informações da leitura (${rv.info.length})</summary>${lst(rv.info,'i')}</details>`:''}
+  ${rv.identical?`<p class="rvid">Este conteúdo é <b>idêntico</b> à revisão ${P.revision} já publicada. Não há nada novo para publicar e nenhuma revisão será criada.</p>`:''}
+  ${P&&!rv.identical?(rv.diff?`<h4 class="rvh">Comparação com a publicação vigente (r${P.revision})</h4>${diffTable(rv.diff,'Publicado r'+P.revision,'Esta importação')}`:`<p class="leg">Comparação indisponível: a revisão ${P.revision} publicada não está carregada neste navegador. Use “Atualizar do servidor” e importe de novo para ver a comparação.</p>`):''}
+  ${o.local?`<p class="leg" style="margin:10px 0 0">Também substitui o registro deste mês salvo só neste navegador (arquivo ${esc(o.local.file)}, importado em ${esc(fmtDt(o.local.savedAt))}).</p>`:''}
+  ${o.offline?'<p class="bad2">Sem conexão com o servidor: a situação publicada pode estar desatualizada. Se outra publicação tiver acontecido, o servidor recusa e nada é gravado.</p>':''}`}
+async function reviewDlg(d,rv,o){const canLocal=!rv.errors.some(e=>/^Estrutura dos dados inválida/.test(e)),canPub=!rv.errors.length&&!rv.identical;
+  const b=[];if(canPub)b.push(['pub',o.published?'Publicar como revisão '+rv.nextRevision:'Publicar (revisão 1)','']);if(canLocal)b.push(['loc','Só salvar neste navegador',canPub?'alt':'']);b.push(['x','Cancelar (nada é alterado)','alt']);
+  for(;;){const a=await dlg(reviewHtml(d,rv,o),b,true);
+    if(a!=='pub'||!o.published)return a;
+    const c=await dlg(`<h3>Confirmar nova revisão</h3><p>${esc(keyLabel(rv.key))} já está publicado na <b>revisão ${o.published.revision}</b> (${esc(o.published.file)}, ${esc(fmtDt(o.published.publishedAt))}).</p><p>Será criada a <b>revisão ${rv.nextRevision}</b> com o arquivo <b>${esc(rv.stats.file)}</b>, visível para todos. A revisão ${o.published.revision} continua guardada no histórico de versões e pode ser recuperada depois.</p>`,[['ok','Confirmar e publicar a revisão '+rv.nextRevision,''],['back','Voltar à conferência','alt']]);
+    if(c==='ok')return'pub'}}
+const pubMsg=pr=>pr.code==='conteudo_identico'?'O servidor informou que o conteúdo é idêntico ao já publicado; nenhuma revisão foi criada.':pr.code==='revisao_alterada'?'Outra publicação deste mês aconteceu depois da sua conferência (agora na revisão '+(pr.currentRevision??'?')+'). Nada foi gravado: atualize do servidor e importe de novo para conferir.':pr.reason+(pr.details?' ('+pr.details.join('; ')+')':'');
+
+/* --- histórico de versões e recuperação --- */
+async function pickMonth(){const ks=[...REMOTE_META.keys()].sort().reverse();
+  if(!ks.length){await dlg('<h3>Versões publicadas</h3><p>Nenhum mês publicado no servidor foi encontrado. Use “Atualizar do servidor” e tente de novo.</p>',[['x','Fechar','']]);return null}
+  const a=await dlg(`<h3>Versões publicadas</h3><p>Escolha o mês:</p><div class="rvms">${ks.map(k=>{const m=REMOTE_META.get(k);return`<button class="btn alt sm" data-dr="k:${k}">${esc(keyLabel(k))} · r${m.revision}</button>`}).join(' ')}</div>`,[['x','Cancelar','alt']]);
+  return a&&a.startsWith('k:')?a.slice(2):null}
+async function openVersions(key){if(!key)key=await pickMonth();if(!key)return;
+  for(;;){const r=await edgeCall({action:'versions',periodKey:key});
+    if(!r.ok){if(!r.cancelled)await dlg(`<h3>Versões de ${esc(keyLabel(key))}</h3><p class="bad2">${esc(r.reason)}</p>`,[['x','Fechar','']]);return}
+    const j=r.j,m=(j.months||[])[0],cur=j.current,vs=j.versions||[],isCur=cur&&cur.period_key===key;
+    if(m)REMOTE_META.set(key,{...(REMOTE_META.get(key)||{}),...m});
+    const rows=vs.map(v=>{const vig=m&&v.revision===m.revision,same=m&&v.checksum===m.checksum;
+      return`<tr${vig?' class="rvch"':''}><td>${revTag(v.revision)}${vig?' '+tag('VIGENTE','ok'):''}</td><td class="l">${esc(ACT[v.action]||v.action)}${v.restored_from_revision?' da r'+v.restored_from_revision:''}</td><td class="l">${esc(v.file_name)}</td><td>${esc(fmtDt(v.published_at))}</td><td class="l">${esc(v.published_by)}</td><td>${v.set_current?'sim':'não'}</td>
+      <td class="l"><button class="btn alt sm" data-dr="v:${v.revision}">Ver</button>${same?'':` <button class="btn sm" data-dr="r:${v.revision}">Recuperar</button>`}</td></tr>`}).join('');
+    const lost=(j.lost||[]).length?`<details class="rvd"><summary>${j.lost.length} revisão(ões) anteriores ao histórico de versões (somente metadados)</summary><p class="leg">Estas publicações aconteceram antes da ativação do histórico completo: os dados foram substituídos na época e não podem ser recuperados.</p><ul class="rvl i">${j.lost.map(x=>`<li>r${x.revision} · ${esc(x.file_name)} · ${esc(fmtDt(x.published_at))} · ${esc(x.published_by)}</li>`).join('')}</ul></details>`:'';
+    const a=await dlg(`<h3>Versões publicadas · ${esc(keyLabel(key))}</h3><p>Revisão vigente: ${m?revTag(m.revision)+' · '+esc(m.file_name)+' · '+esc(fmtDt(m.published_at)):'—'}${isCur?' · '+tag('VERSÃO CORRENTE PARA TODOS','in'):''}. Próxima revisão: ${m?revTag(m.revision+1):'—'}.</p>
+      <div class="sc"><table class="cmp"><tr><th>Revisão</th><th>Operação</th><th>Arquivo</th><th>Publicada em</th><th>Por</th><th>Virou corrente</th><th>Ações</th></tr>${rows||'<tr><td colspan="7" class="l mut">Nenhuma versão completa guardada.</td></tr>'}</table></div>${lost}
+      <p class="leg" style="margin:8px 0 0">Recuperar uma versão cria uma <b>nova revisão</b> com os dados dela. Nenhuma versão é apagada.</p>`,[['x','Fechar','alt']],true);
+    if(!a||a==='x')return;
+    let[op,rv]=a.split(':');rv=+rv;
+    if(op==='v'){const nx=await viewVersion(key,rv,m);if(nx==='r')op='r';else continue}
+    if(op==='r')await restoreVersion(key,rv,m,cur,vs.find(v=>v.revision===rv))}}
+async function viewVersion(key,rev,m){const r=await edgeCall({action:'version',periodKey:key,revision:rev});
+  if(!r.ok){await dlg(`<h3>Versão r${rev}</h3><p class="bad2">${esc(r.reason)}</p>`,[['x','Voltar','']]);return null}
+  const v=r.j.version,er=validateData(v.data),s=er?null:summarize(v.data),he=HIST.get(key),cs=he&&he.central&&m&&he.rc===m.checksum?he.sum:null,vig=m&&v.checksum===m.checksum;
+  const body=er?`<p class="bad2">Os dados desta versão não passaram na validação do painel: ${esc(er)}.</p>`:`<div class="rvks">${[['FTR geral',pc(s.ftrGeral),'meta '+pc(s.meta)],...STG.map(([k,n])=>['FTR '+n,pc(s.stages[k].off),'recalculado '+pc(s.stages[k].rec)]),['Lotes avaliados',s.tot.lots,s.tot.lotsBad+' com desvio'],['Ocorrências fora',s.tot.fora,'']].map(([l,x,sub])=>`<div class="rvk"><span>${l}</span><b>${x}</b>${sub?'<em>'+sub+'</em>':''}</div>`).join('')}</div>
+    ${vig?'<p class="grn">Esta é a versão vigente.</p>':cs?`<h4 class="rvh">Comparação: vigente r${m.revision} × esta versão r${rev}</h4>${diffTable(summaryDiff(cs,s),'Vigente r'+m.revision,'r'+rev)}`:'<p class="leg">Comparação com a vigente indisponível neste navegador (atualize do servidor).</p>'}`;
+  const b=[];if(!vig&&!er)b.push(['r','Recuperar esta versão','']);b.push(['x','Voltar','alt']);
+  return dlg(`<h3>${esc(keyLabel(key))} · revisão ${rev}</h3><div class="ig rvg"><b>Arquivo</b><span>${esc(v.file_name)}</span><b>Operação</b><span>${esc(ACT[v.action]||v.action)}${v.restored_from_revision?' da r'+v.restored_from_revision:''}</span><b>Publicada em</b><span>${esc(fmtDt(v.published_at))} por ${esc(v.published_by)}</span><b>Checksum</b><span>${esc(v.checksum)}</span></div>${body}`,b,true)}
+async function restoreVersion(key,rev,m,cur,v){if(!m||!v)return;const isCur=cur&&cur.period_key===key;
+  const a=await dlg(`<h3>Recuperar ${esc(keyLabel(key))} · revisão ${rev}?</h3>
+    <div class="ig rvg"><b>Versão escolhida</b><span>r${rev} · ${esc(v.file_name)} · ${esc(fmtDt(v.published_at))} · ${esc(v.published_by)}</span><b>Vigente agora</b><span>r${m.revision} · ${esc(m.file_name)}</span><b>Resultado</b><span>nova <b>revisão ${m.revision+1}</b> com os dados da r${rev}</span></div>
+    <p>Nenhuma versão é apagada: a r${m.revision} e todas as anteriores continuam no histórico. A operação fica registrada como recuperação da r${rev}.</p>
+    ${isCur?'<p class="leg">Este mês é a versão corrente exibida para todos: todos passam a ver os dados recuperados.</p>':`<label class="rvcb"><input type="checkbox" id="rvcur"> Tornar este mês a versão corrente exibida para todos (hoje: ${esc(cur?keyLabel(cur.period_key):'—')})</label>`}`,
+    [['ok','Confirmar recuperação','bad'],['x','Cancelar','alt']]);
+  const setCur=!isCur&&!!($('rvcur')&&$('rvcur').checked);
+  if(a!=='ok')return;
+  const r=await edgeCall({action:'restore',periodKey:key,revision:rev,expectedRevision:m.revision,setCurrent:setCur});
+  if(!r.ok){await dlg(`<h3>Recuperação não realizada</h3><p class="bad2">${esc(r.code==='revisao_alterada'?'Outra publicação deste mês aconteceu enquanto você conferia. Nada foi alterado; a lista será atualizada.':r.reason)}</p>`,[['x','Voltar','']]);return}
+  const j=r.j;REMOTE_META.set(key,{period_key:key,revision:j.revision,checksum:j.checksum,file_name:j.file,published_at:j.publishedAt});VMETA=null;
+  await syncRemote({manual:true});
+  say(keyLabel(key)+': revisão '+j.revision+' criada com os dados da r'+rev+'.')}
+
+/* --- quadro de gestão (o que está publicado, próxima revisão, quem e quando) --- */
+function cardGestao(){const dk=pkeyOf(D.period),dm=dk?REMOTE_META.get(dk):null,ck=PUBINFO.key,cm=ck?REMOTE_META.get(ck):null,p=getPend();
+  const all=[...REMOTE_META.values()].sort((a,b)=>String(b.published_at).localeCompare(String(a.published_at))),lp=all[0],who=lp&&lastPubOf(lp.period_key);
+  const L=LASTATT,row=(a,b)=>`<b>${a}</b><span>${b}</span>`;
+  return card('GESTÃO DA PUBLICAÇÃO',`<div class="ig rvg">${row('Mês exibido',`${esc(keyLabel(dk))}${viewKey?' '+tag('HISTÓRICO','in'):''}`)+row('Publicado deste mês',dm?`${revTag(dm.revision)} · ${esc(fmtDt(dm.published_at))} · ${esc(dm.file_name)}`:'<span class="mut">não publicado no servidor</span>')
+    +row('Próxima revisão',dk?revTag(dm?dm.revision+1:1):'—')+row('Versão corrente (todos)',ck?`${esc(keyLabel(ck))} ${cm?revTag(cm.revision):''}`:'<span class="mut">—</span>')
+    +row('Última publicação',lp?`${esc(keyLabel(lp.period_key))} ${revTag(lp.revision)} · ${esc(fmtDt(lp.published_at))}${who&&who.period_key===lp.period_key&&who.revision===lp.revision?' · por <b>'+esc(who.published_by)+'</b>':VMETA?'':' · <button class="btn alt sm" data-vload="1">Ver quem publicou</button>'}`:'<span class="mut">—</span>')
+    +row('Pendência local',p?`<span class="red">${esc(keyLabel(p.key))} importado e ainda não publicado</span>`:'nenhuma')
+    +row('Última importação',L?`${esc(L.file)} · ${esc(fmtDt(L.at.toISOString()))} · ${esc(L.result)}${L.rv?` · ${L.rv.e?'<span class="red">'+L.rv.e+' erro(s)</span>':'0 erro'} · ${L.rv.w?'<span class="ambt">'+L.rv.w+' aviso(s)</span>':'0 aviso'}`:''}`:'<span class="mut">nenhuma nesta sessão</span>')}</div>
+    <p style="margin-top:10px"><button class="btn alt sm" data-vers="${dm?dk:''}">Versões publicadas${dm?' de '+esc(keyLabel(dk)):''}</button> <button class="btn alt sm" data-bk="sbk">Backup completo do servidor</button> <button class="btn alt sm" data-bk="sbkchk">Verificar backup do servidor</button></p>
+    <p class="leg" style="margin:6px 0 0">Quem publicou é informação privada: aparece só para publicadores autorizados, depois do login.</p>`)}
+
+/* --- backup completo do servidor e verificação (prévia, sem gravar) --- */
+async function exportServerBackup(){const r=await edgeCall({action:'backup'});
+  if(!r.ok){if(!r.cancelled)impBox('err','<span class="red">✕ Backup do servidor não gerado</span>',null,'servidor',[['bad',esc(r.reason)+'. Nada foi alterado.']]);return}
+  // o backup NUNCA é bloqueado: tudo o que está no servidor é salvo; versões com problema são listadas como aviso
+  const o=buildServerBackup(r.j),txt=JSON.stringify(o),ck=checkServerBackup(JSON.parse(txt)),nm=new Set(o.versions.map(v=>v.key)).size;
+  await saveFile('backup_servidor_ftr_'+new Date().toISOString().slice(0,10)+'.json',txt,'application/json;charset=utf-8',`Backup do servidor com ${o.versions.length} versão(ões) de ${nm} mês(es)`);
+  if(ck.P.length||ck.W.length)impBox('warn','⚠ Backup do servidor salvo, com avisos',null,'servidor',[['',`Todas as ${o.versions.length} versões foram salvas no arquivo. A verificação encontrou itens para conferir:`],...ck.P.map(x=>['amb','⚠ '+esc(x)+' (esta versão não poderá ser republicada a partir do backup)']),...ck.W.map(x=>['amb','⚠ '+esc(x)])])}
+async function onServerBackupFile(f){let obj;try{obj=JSON.parse(await f.text())}catch(e){impBox('err','<span class="red">✕ Backup ilegível</span>',null,f.name,[['bad','O arquivo não é um JSON válido. Nada foi alterado.']]);return}
+  for(;;){const{P,W,V}=checkServerBackup(obj);
+    const rows=V.map((v,i)=>{const rm=REMOTE_META.get(v.key),st=!rm?tag('MÊS NÃO PUBLICADO NO SERVIDOR','er'):rm.revision===v.revision&&rm.checksum===v.checksum?tag('VIGENTE NO SERVIDOR','ok'):tag('DIFERENTE DA VIGENTE (r'+rm.revision+')','na');
+      return`<tr><td class="l"><b>${esc(keyLabel(v.key))}</b></td><td>r${v.revision}</td><td class="l">${esc(ACT[v.action]||v.action)}</td><td class="l">${esc(v.file)}</td><td>${esc(fmtDt(v.publishedAt))}</td><td class="l">${esc(v.publishedBy||'')}</td><td>${tag('✓ íntegra','ok')}</td><td class="l">${st}</td><td class="l"><button class="btn alt sm" data-dr="rp:${i}">Republicar como nova revisão</button></td></tr>`}).join('');
+    const a=await dlg(`<h3>Verificar backup do servidor (prévia)</h3><p class="mut">Arquivo <b>${esc(f.name)}</b>${obj&&obj.exportedAt?' · exportado em '+esc(fmtDt(obj.exportedAt)):''}${obj&&obj.exportedBy?' por '+esc(obj.exportedBy):''} · ${V.length} versão(ões) válida(s)${obj&&Array.isArray(obj.versions)?' de '+obj.versions.length:''}</p>
+      ${P.length?`<p class="bad2">✕ Problemas (${P.length}): o arquivo não pode ser usado</p><ul class="rvl e">${P.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:'<p class="grn">✓ Integridade e estrutura verificadas em todas as versões.</p>'}
+      ${W.length?`<ul class="rvl w">${W.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:''}
+      ${!P.length&&rows?`<div class="sc mh"><table class="cmp"><tr><th>Mês</th><th>Revisão</th><th>Operação</th><th>Arquivo</th><th>Publicada em</th><th>Por</th><th>Integridade</th><th>Situação no servidor</th><th>Ação</th></tr>${rows}</table></div>`:''}
+      <p class="leg" style="margin:8px 0 0">A verificação não grava nada. Para voltar a uma versão que ainda existe no servidor, prefira “Versões publicadas”. Republicar a partir do backup cria uma <b>nova revisão</b> (nada é apagado) e passa pelas mesmas validações de uma importação.</p>`,[['x','Fechar','alt']],true);
+    if(!a||!a.startsWith('rp:')||P.length)return;
+    const v=V[+a.slice(3)],rm=REMOTE_META.get(v.key);
+    const c=await dlg(`<h3>Republicar ${esc(keyLabel(v.key))} a partir do backup?</h3><p>Os dados da r${v.revision} do backup (${esc(v.file)}) serão publicados como <b>revisão ${rm?rm.revision+1:1}</b>. ${rm?'A revisão vigente r'+rm.revision+' continua no histórico.':'Este mês ainda não está publicado.'}</p>`,[['ok','Republicar',''],['x','Cancelar','alt']]);
+    if(c!=='ok')continue;
+    const pr=await publishData(v.d,v.key,v.file,PUBINFO.key===v.key||!PUBINFO.key,rm?rm.revision:0);
+    if(pr.ok){say(keyLabel(v.key)+' republicado como revisão '+pr.revision+'.');await syncRemote({manual:true});return}
+    await dlg(`<h3>Não republicado</h3><p class="bad2">${esc(pubMsg(pr))}</p>`,[['x','Voltar','']])}}
+$('fsbk').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f&&ready)onServerBackupFile(f)};
+
+/* --- exportação de dados (Excel e CSV), respeitando os filtros ativos de cada etapa --- */
+function exportCtx(){const R={},fd=[];
+  [['bh',ALL,'Brewhouse'],['fe',FEA,'Fermentação'],['bb',BBA,'Bright Beer']].forEach(([k,arr,n])=>{F=FA[k];R[k]=filt(false,arr);const ch=activeChips();if(ch.length)fd.push(n+': '+ch.map(c=>c[2]).join(', '))});
+  F=FA[pkey()];
+  const hk=histKeys(),hist=hk.map(k=>{const e=HIST.get(k);return{key:k,file:e.rec.file,savedAt:e.rec.savedAt,central:!!e.central,pub:!!e.pub,sum:e.sum}});
+  const a=CS.a&&HIST.has(CS.a)?CS.a:hk[hk.length-2],b=CS.b&&HIST.has(CS.b)?CS.b:hk[hk.length-1];
+  const cmp=a&&b&&a!==b?{a:{key:a,sum:HIST.get(a).sum},b:{key:b,sum:HIST.get(b).sum}}:null;
+  return exportTables({D,sum:summarize(D),R,hist,cmp,filters:fd.join(' · ')||'nenhum',generatedAt:new Date().toISOString()})}
+const expName=ext=>'dados_FTR_'+(pkeyOf(D.period)||'periodo')+'_'+new Date().toISOString().slice(0,10)+'.'+ext;
+async function exportXlsx(){if(!window.XLSX){say('A biblioteca de planilhas (SheetJS) não carregou; verifique o acesso a cdnjs.cloudflare.com.');return}
+  const T=exportCtx(),wb=XLSX.utils.book_new();
+  T.forEach(t=>{const rows=sheetCells(t),ws={};let mc=0;rows.forEach((r,ri)=>r.forEach((c,ci)=>{if(c){ws[XLSX.utils.encode_cell({r:ri,c:ci})]=c;mc=Math.max(mc,ci)}}));
+    ws['!ref']=XLSX.utils.encode_range({s:{r:0,c:0},e:{r:Math.max(0,rows.length-1),c:mc}});ws['!cols']=t.cols.map(c=>({wch:Math.min(48,Math.max(12,c[0].length+4))}));
+    XLSX.utils.book_append_sheet(wb,ws,t.name.slice(0,31))});
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+  await saveFile(expName('xlsx'),out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',`Planilha com ${T.length} abas (filtros: ${T[T.length-1].rows[3][1]})`)}
+async function exportCsvMenu(){const T=exportCtx();
+  const a=await dlg(`<h3>Exportar dados (CSV)</h3><p>Escolha a tabela. O CSV abre no Excel em português (separador “;” e vírgula decimal). Lotes e desvios respeitam os filtros ativos.</p><div class="rvms">${T.map((t,i)=>`<button class="btn alt sm" data-dr="c:${i}">${esc(t.name)} (${t.rows.length})</button>`).join(' ')}</div>`,[['x','Cancelar','alt']]);
+  if(!a||!a.startsWith('c:'))return;const t=T[+a.slice(2)];
+  await saveFile('FTR_'+t.name.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\W+/g,'_').toLowerCase()+'_'+(pkeyOf(D.period)||'periodo')+'.csv',toCsv(t),'text/csv;charset=utf-8',`CSV “${t.name}” com ${t.rows.length} linha(s)`)}
 
 /* ===== 8. MODO TV E TEMA ===== */
 function tvTimer(){clearInterval(tvT);tvT=null;if(tvAct&&tvOn)tvT=setInterval(()=>{if($('mod').hidden){page=ROT[(ROT.indexOf(page)+1)%ROT.length];render()}},tvSec*1000)}
