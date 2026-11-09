@@ -23,7 +23,9 @@ Implantação, janela de transição com o painel antigo e rollback: `documentac
 Pontos importantes:
 - O histórico guarda os **dados interpretados** de cada planilha, não o arquivo Excel original.
 - Integridade do backup (FNV-1a/sha256) detecta corrupção e alterações acidentais; **autenticidade** só com a
-  assinatura HMAC do servidor (segredo `PAINEL_BACKUP_HMAC_KEY`, ainda não configurado).
+  assinatura HMAC-SHA256 do servidor sobre o conteúdo integral do arquivo (JSON canônico RFC 8785, formato 2),
+  que exige o segredo `PAINEL_BACKUP_HMAC_KEY`, ainda não configurado. Sem ele, os backups saem no formato 1 e
+  aparecem como "sem autenticidade comprovada".
 - Rollback não apaga o histórico: desativa as funções novas e arquiva os dados.
 - Não use `supabase db push` deste repositório: o histórico de migrations remoto é compartilhado com o CIP.
 

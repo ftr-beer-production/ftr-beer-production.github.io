@@ -21,7 +21,7 @@
 | 2 🔒 | Aplicar a **migration** pelo SQL Editor (colar o arquivo inteiro) ou por `apply_migration`, com o nome `painel_versoes` e a versão `20261109120000`. **Não usar `supabase db push`.** | O histórico remoto tem migrations do CIP que este repositório não conhece | `select period_key, revision, action, via from painel_month_versions order by 1,2;` mostra uma linha `backfill` por mês |
 | 3 🔒 | Implantar a **Edge Function** `painel-publish` (verify_jwt = false) | Com a migration aplicada, o painel antigo (ainda no ar) passa a publicar pelo caminho de compatibilidade, e o histórico já é capturado | Publicar pelo site oficial (ainda o antigo) funciona; a nova revisão aparece em `painel_month_versions` com `via = 'v1'` |
 | 4 🔒 | Merge da branch no `main`, o que publica o painel novo pelo GitHub Pages | O painel novo usa o fluxo moderno | Publicar pelo site: `via = 'v2'` e resposta com `path: 'moderno'` |
-| 5 🔒 (opcional) | Configurar o segredo `PAINEL_BACKUP_HMAC_KEY` (e opcionalmente `PAINEL_BACKUP_HMAC_KEY_ID`) | Liga a assinatura dos backups | Backup novo mostra "Assinado pelo servidor"; "Conferir autenticidade" mostra "Autêntico" |
+| 5 🔒 (opcional) | Configurar o segredo `PAINEL_BACKUP_HMAC_KEY` (e opcionalmente `PAINEL_BACKUP_HMAC_KEY_ID`) | Backups passam ao formato 2, assinado sobre o conteúdo integral | Backup novo mostra "Assinado pelo servidor"; em Verificar backup, "Conferir autenticidade no servidor" mostra "Autêntico". Antes disso os backups saem no formato 1 (sem assinatura). |
 | 6 🔒 (opcional, depois de dias de uso) | Configurar `PAINEL_LEGACY_PUBLISH=off` | Desliga o caminho de compatibilidade quando ninguém mais usa o painel antigo (cache de navegador) | Uma publicação com corpo antigo recebe 426 `cliente_desatualizado` |
 
 ### Janela de transição (entre os passos 3 e 4)
@@ -44,12 +44,22 @@
 
 | Segredo | Efeito | Observação |
 |---|---|---|
-| `PAINEL_BACKUP_HMAC_KEY` | Liga a assinatura HMAC-SHA256 dos backups e a conferência `verify_backup` | Mínimo de 32 caracteres aleatórios. Fica **só** nos segredos da Edge Function, nunca no `docs/`. Sem ele, o backup sai sem assinatura (comportamento atual). |
-| `PAINEL_BACKUP_HMAC_KEY_ID` | Identificador da chave, gravado no backup (padrão `k1`) | Troque ao rotacionar a chave. Backups com outro identificador são informados como "outra chave". |
+| `PAINEL_BACKUP_HMAC_KEY` | Liga o formato 2: assinatura HMAC-SHA256 do conteúdo integral do backup (JSON canônico RFC 8785) e a conferência `verify_backup` | Mínimo de 32 caracteres aleatórios. Fica **só** nos segredos da Edge Function, nunca no `docs/`. Sem ele, o backup sai sem assinatura (comportamento atual). |
+| `PAINEL_BACKUP_HMAC_KEY_ID` | Identificador da chave, gravado no backup e incluído na mensagem assinada (padrão `k1`) | Troque ao rotacionar a chave. |
+| `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS` | JSON `{"<keyId>":"<segredo>"}` com chaves anteriores, usadas **só para conferir** backups antigos (nunca para assinar) | Ver a rotação abaixo. Sem a chave anterior, backups dela aparecem como "chave desconhecida". |
 | `PAINEL_LEGACY_PUBLISH` | `off` desliga o caminho de compatibilidade | Só depois de o painel novo estar no ar |
 | `ALLOWED_ORIGINS` | Já existia: origens extras permitidas | Sem mudança |
 
 Para gerar um segredo forte sem serviço externo, use por exemplo, num terminal: `openssl rand -hex 32`. Configure em Dashboard ▸ Edge Functions ▸ Secrets. Não há custo adicional.
+
+## Rotação da chave de assinatura (quando o segredo já estiver em uso)
+
+1. 🔒 Gerar a chave nova (`openssl rand -hex 32`) e escolher um identificador novo (ex.: `k2027`).
+2. 🔒 Copiar a chave atual para `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS` (`{"k2026":"<segredo atual>"}`), somando-a às anteriores que ainda quiser conferir.
+3. 🔒 Trocar `PAINEL_BACKUP_HMAC_KEY` e `PAINEL_BACKUP_HMAC_KEY_ID` pelos novos valores.
+4. Conferir: um backup novo sai com o identificador novo, e um backup antigo continua "Autêntico (assinado com a chave anterior)".
+
+Uma chave perdida, ou substituída sem ser guardada em `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS`, torna impossível autenticar os backups assinados com ela. Não há como recuperar essas assinaturas; os arquivos continuam legíveis como não autenticados. Se uma chave vazar, remova-a de todos os segredos e trate os backups dela como não autenticados.
 
 ## Rollback
 
@@ -75,5 +85,5 @@ O que o rollback faz e não faz:
 - [ ] Publicação pelo painel novo: revisão + 1, `via = 'v2'`
 - [ ] Reimportar a mesma planilha: "Conteúdo idêntico"
 - [ ] Versões publicadas: lista, prévia e recuperação como nova revisão
-- [ ] Backup do servidor e verificação; autenticidade (se o segredo foi configurado)
+- [ ] Backup do servidor e verificação: formato 1 "sem autenticidade comprovada" sem o segredo; formato 2 "Autêntico" com o segredo
 - [ ] `get_advisors` (segurança): nenhum alerta novo para objetos `painel_*` além do INFO intencional "RLS sem política"

@@ -87,7 +87,7 @@ function auth(url, headers, bodyTxt) {
 
 // ---------------------------------------------------------------- Edge Function REAL (index.ts), com fetch apontando para a API simulada
 const tmp = mkdtempSync(join(tmpdir(), 'edge-')); copyFileSync(join(RAIZ, 'supabase/functions/painel-publish/index.ts'), join(tmp, 'edge.ts'));
-const { handle } = await import(join(tmp, 'edge.ts'));
+const { handle, canonical } = await import(join(tmp, 'edge.ts'));
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (u, o = {}) => { const url = new URL(u); if (url.host !== 'fake.supabase.co') return realFetch(u, o);
   const h = Object.fromEntries(Object.entries(o.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
@@ -219,37 +219,58 @@ try {
   if (process.env.E2E_DEBUG) { try { await page.locator('.menu button', { hasText: 'Backup completo do servidor' }).click({ trial: true, timeout: 4000 }); console.log('[debug] clicável'); } catch (e) { console.log('[debug] clique:', e.message.split('\n').slice(0, 12).join(' | ')); } }
   const [dl2] = await Promise.all([page.waitForEvent('download', { timeout: 20000 }), (async () => { await page.locator('.menu button', { hasText: 'Backup completo do servidor' }).click(); await login('pub@teste.local'); })()]);
   const bk = JSON.parse(readFileSync(await dl2.path(), 'utf8'));
-  ok(bk.format === 'ftr-painel-server-backup' && bk.versions.length === 5, `backup do servidor com todas as versões (${bk.versions.length}: setembro r1 e outubro r1 a r4)`);
-  const bkf = join(tmp, 'backup.json'); writeFileSync(bkf, JSON.stringify(bk));
-  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
-  ok((await dlgTxt()).includes('Integridade e estrutura verificadas'), 'verificação do backup confirma a integridade');
-  ok(bk.auth && bk.auth.alg === 'HMAC-SHA256' && bk.versions.every((v) => v.sig && v.sha256) && !JSON.stringify(bk).includes(EDGE_ENV.PAINEL_BACKUP_HMAC_KEY), 'backup assinado pelo servidor (HMAC), sem o segredo no arquivo');
-  ok(bk.versions.every((v) => v.sha256 === createHash('sha256').update(v.dataJson).digest('hex')), 'sha256 do servidor confere com o JSON salvo pelo navegador');
-  await clicar('Conferir autenticidade no servidor'); await esperaDlg('Autêntico');
-  ok(true, 'autenticidade conferida no servidor: backup original autêntico');
+  const sha = (s) => createHash('sha256').update(s).digest('hex'), corpo = (o) => { const c = { ...o }; delete c.auth; return c; };
+  ok(bk.format === 'ftr-painel-server-backup' && bk.version === 2 && bk.versions.length === 5, `backup do servidor no formato 2 com todas as versões (${bk.versions.length}: setembro r1 e outubro r1 a r4)`);
+  ok(bk.auth && bk.auth.alg === 'HMAC-SHA256' && bk.auth.scheme === 'ftr-painel-backup-v2' && bk.auth.contentSha256 === sha(canonical(corpo(bk))) && !JSON.stringify(bk).includes(EDGE_ENV.PAINEL_BACKUP_HMAC_KEY),
+    'assinatura do servidor cobre o JSON canônico do arquivo inteiro; o segredo não está no arquivo');
+  ok(bk.versions.every((v) => v.sha256 === sha(v.dataJson)) && bk.publications.every((p) => 'via' in p) && bk.current && bk.current.key, 'arquivo traz versões, publicações (com o caminho v1/v2), meses e versão corrente');
+  const bkf = join(tmp, 'backup.json'), abrir = async (o) => { writeFileSync(bkf, JSON.stringify(o)); await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor'); return dlgTxt(); };
+  const nRep = () => page.locator('#dlg #db button', { hasText: 'Republicar como nova revisão' }).count();
+  let tx = await abrir(bk);
+  ok(tx.includes('Estrutura e integridade conferidas') && tx.includes('autenticidade ainda não conferida') && !tx.includes('Autêntico') && await nRep() === 0,
+    'antes da conferência no servidor: íntegro, mas não "autêntico", e a republicação fica bloqueada');
+  await clicar('Conferir autenticidade no servidor'); await esperaDlg('Autêntico:');
+  ok(await nRep() === bk.versions.length, 'autenticidade do conteúdo integral conferida no servidor: republicação liberada');
+  // republicar a r1 de outubro a partir do backup autêntico: nova revisão, pelo fluxo moderno
+  const revR = +q1(`select revision from painel_months where period_key='2026-10'`), iR1 = bk.versions.findIndex((v) => v.key === '2026-10' && v.revision === 1);
+  await page.locator(`#dlg #db button[data-dr="rp:${iR1}"]`).click(); await esperaDlg('Republicar Outubro/2026 a partir do backup?');
+  ok((await dlgTxt()).includes('Backup autêntico'), 'confirmação da republicação informa que o backup é autêntico');
+  await clicar('Republicar');
+  await page.waitForFunction(() => /republicado como revisão/.test(document.getElementById('msg').innerText), null, { timeout: 15000 });
+  ok(q1(`select revision||'|'||via||'|'||action from painel_month_versions where period_key='2026-10' order by revision desc limit 1`) === `${revR + 1}|v2|publish` && q1(`select count(*) from painel_month_versions where period_key='2026-10'`) === String(revR + 1),
+    `republicação criou a revisão ${revR + 1} (fluxo moderno), sem apagar nenhuma versão`);
   const antes = q1(`select count(*) from painel_month_versions`);
+  const refaz = (o) => { for (const v of o.versions) { v.integrity = fnv(v.dataJson); v.sha256 = sha(v.dataJson); } if (o.auth) o.auth.contentSha256 = sha(canonical(corpo(o))); return o; };
+  const copia = () => JSON.parse(JSON.stringify(bk));
+  // (a) edição sem recalcular: integridade inválida
+  const ed = copia(); ed.versions[0].dataJson = ed.versions[0].dataJson.replace('"meta":92', '"meta":10');
+  tx = await abrir(ed); ok(tx.includes('Integridade inválida') && await nRep() === 0, 'arquivo editado sem recalcular: "Integridade inválida", nada pode ser republicado');
   await clicar('Fechar');
-  const original = JSON.stringify(bk);
-  // (a) edição acidental/sem recalcular: a integridade falha
-  bk.versions[0].dataJson = bk.versions[0].dataJson.replace('"meta":92', '"meta":10'); writeFileSync(bkf, JSON.stringify(bk));
-  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
-  ok((await dlgTxt()).includes('verificação de integridade falhou'), 'backup editado sem recalcular é rejeitado na prévia');
-  await clicar('Fechar');
-  // (b) adulteração DELIBERADA com recálculo de FNV e sha256: a integridade passa, a autenticidade não
-  const adult = JSON.parse(original), va = adult.versions[adult.versions.length - 1];
-  va.dataJson = va.dataJson.replace('"ftrGeral":0.95', '"ftrGeral":0.99'); va.integrity = fnv(va.dataJson); va.sha256 = createHash('sha256').update(va.dataJson).digest('hex');
-  assert.ok(va.dataJson.includes('0.99')); writeFileSync(bkf, JSON.stringify(adult));
-  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
-  ok((await dlgTxt()).includes('Integridade e estrutura verificadas'), 'adulteração com recálculo passa na verificação de integridade (limitação documentada)');
+  // (b) adulteração DELIBERADA só de metadados (publicador e data), com FNV, SHA-256 e resumo do conteúdo recalculados
+  const ad = copia(), vi = ad.versions.findIndex((v) => v.key === '2026-10' && v.revision === 2), pi = ad.publications.findIndex((p) => p.id === ad.versions[vi].publicationId);
+  ad.versions[vi].publishedBy = ad.publications[pi].publishedBy = 'outra.pessoa@teste.local'; refaz(ad);
+  tx = await abrir(ad);
+  ok(tx.includes('Estrutura e integridade conferidas') && !tx.includes('Autêntico'), 'adulteração com hashes recalculados passa na integridade, mas não aparece como autêntica');
   await clicar('Conferir autenticidade no servidor'); await esperaDlg('Assinatura inválida');
-  ok(await page.locator('#dlg #db button', { hasText: 'Republicar como nova revisão' }).count() === adult.versions.length - 1, 'adulteração deliberada detectada pela assinatura; a versão adulterada não pode ser republicada');
+  ok(await nRep() === 0, 'servidor recusa a assinatura: "Assinatura inválida" e nenhuma versão pode ser republicada');
   await clicar('Fechar');
-  // (c) arquivo sem assinatura: autenticidade não comprovada, dito com clareza
-  const sem = JSON.parse(original); delete sem.auth; writeFileSync(bkf, JSON.stringify(sem));
-  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
-  ok((await dlgTxt()).includes('Autenticidade não comprovada'), 'backup sem assinatura: a interface informa que a autenticidade não é comprovada');
+  // (c) assinatura removida de um backup formato 2
+  const sem = copia(); delete sem.auth;
+  tx = await abrir(sem); ok(tx.includes('a assinatura foi removida') && await nRep() === 0, 'assinatura removida não passa despercebida');
   await clicar('Fechar');
-  ok(q1(`select count(*) from painel_month_versions`) === antes, 'verificação não grava nada no banco');
+  // (d) chave desconhecida
+  const ch = copia(); ch.auth.keyId = 'chave-antiga';
+  await abrir(ch); await clicar('Conferir autenticidade no servidor'); await esperaDlg('chave desconhecida');
+  ok(await nRep() === 0, 'chave desconhecida: autenticidade não comprovada');
+  await clicar('Fechar');
+  // (e) backup legado (formato 1, sem assinatura): lido, nunca "autêntico", republicação só com confirmação consciente
+  const leg = copia(); delete leg.auth; leg.version = 1;
+  tx = await abrir(leg); ok(tx.includes('backup legado, sem assinatura') && !tx.includes('Autêntico'), 'backup legado identificado como sem autenticidade comprovada');
+  await page.locator(`#dlg #db button[data-dr="rp:${iR1}"]`).click(); await esperaDlg('Entendo que a autenticidade deste backup não foi comprovada');
+  await clicar('Republicar'); await esperaDlg('Marque a confirmação');
+  ok(true, 'republicação de legado exige confirmação consciente');
+  await clicar('Voltar'); await esperaDlg('Verificar backup do servidor'); await clicar('Fechar');
+  ok(q1(`select count(*) from painel_month_versions`) === antes, 'verificações e tentativas recusadas não gravam nada no banco');
 
   // 9 · painel público, gráficos, histórico, relatório PDF e modo TV continuam funcionando
   await page.click('[data-p="0"]'); ok(await page.locator('.main svg').count() > 0, 'visão geral com gráficos');

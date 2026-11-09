@@ -224,7 +224,7 @@ body.tv .card{box-shadow:none}body.tv .ch h2{font-size:16px}
 .rvk{border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px}
 .rvk span{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.05em}.rvk b{font-size:18px}.rvk em{font-style:normal;font-size:12px;color:var(--mute)}
 .rvl{margin:4px 0 0;padding-left:20px}.rvl li{margin:2px 0}.rvl.e li{color:var(--red)}.rvl.w li::marker{color:var(--amb)}.rvl.i li{color:var(--mute)}
-.ambt{color:var(--amb);font-weight:700}.rvid{background:var(--infobg);color:var(--info);padding:8px 10px;border-radius:8px}
+.ambt{color:var(--amb);font-weight:700}.sbkst{margin:10px 0;padding:9px 11px;border-radius:8px;border:1px solid var(--line,#ccc)}.sbkst.ok{background:var(--gbg);color:var(--g2)}.sbkst.er{background:var(--redbg);color:var(--red)}.sbkst.na{background:var(--nabg);color:var(--na)}.sbkst.in{background:var(--infobg);color:var(--info)}.rvid{background:var(--infobg);color:var(--info);padding:8px 10px;border-radius:8px}
 .rvh{margin:14px 0 6px;font-size:13px}.cmp tr.rvch td{background:var(--ambbg)}.rvd{margin-top:8px}.rvd summary{cursor:pointer;color:var(--mute)}
 .rvms{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.rvcb{display:flex;gap:8px;align-items:center;margin-top:8px}
 @media (max-width:640px){.rvg{grid-template-columns:1fr}}
@@ -1039,39 +1039,100 @@ function validateRecord(rec,hist){try{
   if(hist){const k=pkeyOf(d.period);if(!k||rec.id!=='hist:'+k)return{ok:false,reason:'o período dos dados não confere com o mês do registro'}}
   return{ok:true,data:d}}catch(e){return{ok:false,reason:'registro ilegível ('+e.message+')'}}}
 /*PURE2_START*/
-// ---- Backup COMPLETO do servidor (todas as versões publicadas). "integrity" = FNV-1a do dataJson exportado.
-// INTEGRIDADE (FNV-1a e sha256): detecta corrupção e alterações ACIDENTAIS; NÃO é criptográfica e não impede
-// adulteração deliberada (quem altera os dados pode recalcular os valores). AUTENTICIDADE: só com "auth"/"sig"
-// (HMAC-SHA256 feito pelo servidor com segredo que nunca vem ao navegador), conferida pela ação verify_backup.
-// Campos auth, sha256, sig e via são opcionais (formato 1 continua compatível com backups antigos).
+// ---- Backup COMPLETO do servidor. O arquivo é montado pela Edge Function (ação backup).
+// Formato 2 = ASSINADO: "auth" = {alg:'HMAC-SHA256', scheme:'ftr-painel-backup-v2', keyId, contentSha256, sig}.
+//   contentSha256 = SHA-256 do JSON canônico (RFC 8785, função jcs) do arquivo INTEIRO sem "auth";
+//   sig = HMAC feito no servidor com segredo que nunca vem ao navegador; conferido pela ação verify_backup.
+//   No formato 2 a assinatura é OBRIGATÓRIA: sem "auth" o arquivo não é tratado como autenticado.
+// Formato 1 = SEM assinatura (backups antigos e servidores sem o segredo): lido, mas nunca "autêntico".
+// INTEGRIDADE (FNV-1a "integrity", sha256 por versão, contentSha256): detecta corrupção e alterações acidentais;
+// NÃO impede adulteração deliberada (quem altera pode recalcular). Só a assinatura comprova autenticidade.
 // O backup guarda os DADOS LIDOS das planilhas, não os arquivos Excel originais.
-const SBK_FMT='ftr-painel-server-backup';
+const SBK_FMT='ftr-painel-server-backup',SBK_SCHEME='ftr-painel-backup-v2',SBK_ALG='HMAC-SHA256';
+// JSON canônico RFC 8785 (JCS) — MESMA implementação da Edge Function (canonical); o teste confere as duas.
+const LONE_SUR=/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+function jcs(v){if(v===null)return'null';
+  switch(typeof v){case'boolean':return v?'true':'false';
+    case'number':if(!Number.isFinite(v))throw new Error('JCS: número não finito');return JSON.stringify(v);
+    case'string':if(LONE_SUR.test(v))throw new Error('JCS: texto com caractere Unicode inválido');return JSON.stringify(v);
+    case'object':if(Array.isArray(v))return'['+v.map(jcs).join(',')+']';
+      if(Object.prototype.toString.call(v)!=='[object Object]')throw new Error('JCS: objeto não suportado');
+      return'{'+Object.keys(v).sort().map(k=>jcs(k)+':'+jcs(v[k])).join(',')+'}';
+    default:throw new Error('JCS: tipo não suportado ('+typeof v+')')}}
+// conteúdo assinado = o arquivo inteiro, exceto o envelope "auth"
+function backupBody(o){const c={};Object.keys(o).forEach(k=>{if(k!=='auth')c[k]=o[k]});return c}
+// Usado só se a Edge Function for a antiga (sem "backup" na resposta): formato 1, sem assinatura.
 function buildServerBackup(r){return{format:SBK_FMT,version:1,dataFormat:FMT,exportedAt:r.exportedAt,exportedBy:r.exportedBy,current:r.current||null,
   months:(r.months||[]).map(m=>({key:m.period_key,revision:m.revision,checksum:m.checksum,file:m.file_name,publishedAt:m.published_at})),
-  publications:(r.publications||[]).map(p=>({id:p.id,key:p.period_key,revision:p.revision,file:p.file_name,checksum:p.checksum,publishedBy:p.published_by,publishedAt:p.published_at,setCurrent:p.set_current,replaced:p.replaced,action:p.action||'publish',restoredFromRevision:p.restored_from_revision??null})),
-  auth:r.auth||null,
-  versions:(r.versions||[]).map(v=>{const dataJson=JSON.stringify(v.data);return{key:v.period_key,revision:v.revision,file:v.file_name,checksum:v.checksum,publishedBy:v.published_by,publishedAt:v.published_at,action:v.action,via:v.via||null,restoredFromRevision:v.restored_from_revision??null,setCurrent:v.set_current,integrity:fnv(dataJson),sha256:v.sha256||null,sig:v.sig||null,dataJson}})}}
-// Valida um backup do servidor SEM gravar nada. P = problemas impeditivos, W = avisos, V = versões válidas (com os dados).
+  publications:(r.publications||[]).map(p=>({id:p.id,key:p.period_key,revision:p.revision,file:p.file_name,checksum:p.checksum,publishedBy:p.published_by,publishedAt:p.published_at,setCurrent:p.set_current,replaced:p.replaced,action:p.action||'publish',restoredFromRevision:p.restored_from_revision??null,via:p.via??null})),
+  versions:(r.versions||[]).map(v=>{const dataJson=JSON.stringify(v.data);return{key:v.period_key,revision:v.revision,file:v.file_name,checksum:v.checksum,publishedBy:v.published_by,publishedAt:v.published_at,action:v.action,via:v.via??null,restoredFromRevision:v.restored_from_revision??null,setCurrent:v.set_current,integrity:fnv(dataJson),dataJson}})}}
+// Valida um backup SEM gravar nada (estrutura, integridade e correspondência entre meses, publicações e versões).
+// P = problemas (integridade inválida), W = avisos, V = versões válidas (com os dados).
+// No formato 2 as correspondências são exigidas (P); no formato 1 (legado) viram avisos (W).
 function checkServerBackup(o){const P=[],W=[],V=[];
   if(!o||typeof o!=='object'||Array.isArray(o)){P.push('o conteúdo não é um backup do servidor');return{P,W,V}}
   if(o.format!==SBK_FMT)P.push('formato desconhecido (esperado "'+SBK_FMT+'")');
-  if(o.version!==1)P.push('versão do backup não suportada: '+String(o.version));
+  if(o.version!==1&&o.version!==2)P.push('versão do backup não suportada: '+String(o.version));
   if(o.dataFormat!==FMT)P.push('formato interno dos dados diferente ('+String(o.dataFormat)+'; esperado '+FMT+')');
   if(!Array.isArray(o.versions)||!o.versions.length){P.push('o backup não contém versões');return{P,W,V}}
+  const v2=o.version===2,X=v2?P:W,str=x=>typeof x==='string',KRE=/^\d{4}-(0[1-9]|1[0-2])$/;
+  if(v2){if(typeof o.exportedAt!=='string'||isNaN(Date.parse(o.exportedAt)))P.push('data da exportação ausente ou inválida');if(!str(o.exportedBy)||!o.exportedBy)P.push('identificação de quem exportou ausente');
+    if(!Array.isArray(o.months))P.push('lista de meses ausente');if(!Array.isArray(o.publications))P.push('lista de publicações ausente')}
+  const months=Array.isArray(o.months)?o.months:[],pubs=Array.isArray(o.publications)?o.publications:[],pubById=new Map(),mk=new Set();
+  pubs.forEach((p,i)=>{if(!p||!Number.isInteger(p.id)){X.push('publicação #'+(i+1)+': identificador inválido');return}if(pubById.has(p.id))X.push('publicação '+p.id+': repetida no arquivo');pubById.set(p.id,p)});
+  months.forEach((m,i)=>{if(!m||!str(m.key)||!KRE.test(m.key)||!Number.isInteger(m.revision)){X.push('mês #'+(i+1)+': identificação inválida');return}if(mk.has(m.key))X.push(keyLabel(m.key)+': repetido na lista de meses');mk.add(m.key)});
   const seen=new Set();
   o.versions.forEach((v,i)=>{const id='versão #'+(i+1);
-    if(!v||typeof v.key!=='string'||!/^\d{4}-(0[1-9]|1[0-2])$/.test(v.key)){P.push(id+': período inválido');return}
+    if(!v||!str(v.key)||!KRE.test(v.key)){P.push(id+': período inválido');return}
     if(!Number.isInteger(v.revision)||v.revision<1){P.push(keyLabel(v.key)+': revisão inválida');return}
-    const k=v.key+'|'+v.revision;if(seen.has(k)){P.push(keyLabel(v.key)+' r'+v.revision+': repetida no arquivo');return}seen.add(k);
-    if(typeof v.dataJson!=='string'||fnv(v.dataJson)!==v.integrity){P.push(keyLabel(v.key)+' r'+v.revision+': verificação de integridade falhou');return}
-    let d;try{d=JSON.parse(v.dataJson)}catch(_){P.push(keyLabel(v.key)+' r'+v.revision+': dados ilegíveis');return}
-    const er=validateData(d);if(er){P.push(keyLabel(v.key)+' r'+v.revision+': '+er);return}
-    if(pkeyOf(d.period)!==v.key){P.push(keyLabel(v.key)+' r'+v.revision+': o período dos dados não confere');return}
-    if(!['publish','restore','backfill'].includes(v.action))W.push(keyLabel(v.key)+' r'+v.revision+': tipo de operação desconhecido ('+String(v.action)+')');
+    const nm=keyLabel(v.key)+' r'+v.revision,k=v.key+'|'+v.revision;if(seen.has(k)){P.push(nm+': repetida no arquivo');return}seen.add(k);
+    if(!str(v.dataJson)||fnv(v.dataJson)!==v.integrity){P.push(nm+': verificação de integridade falhou');return}
+    if(v2&&(!str(v.sha256)||!/^[0-9a-f]{64}$/.test(v.sha256))){P.push(nm+': resumo sha256 ausente');return}
+    if(v2&&!(str(v.file)&&str(v.checksum)&&str(v.publishedBy)&&str(v.publishedAt)&&typeof v.setCurrent==='boolean'&&(v.via==null||v.via==='v1'||v.via==='v2'))){P.push(nm+': metadados ausentes ou inválidos');return}
+    let d;try{d=JSON.parse(v.dataJson)}catch(_){P.push(nm+': dados ilegíveis');return}
+    const er=validateData(d);if(er){P.push(nm+': '+er);return}
+    if(pkeyOf(d.period)!==v.key){P.push(nm+': o período dos dados não confere');return}
+    if(!['publish','restore','backfill'].includes(v.action))X.push(nm+': tipo de operação desconhecido ('+String(v.action)+')');
+    if((v.action==='restore')!==(v.restoredFromRevision!=null))X.push(nm+': revisão de origem incoerente com o tipo de operação');
+    if(v.publicationId!=null){const p=pubById.get(v.publicationId);
+      if(!p)X.push(nm+': publicação '+v.publicationId+' não está no arquivo');
+      else if(p.key!==v.key||p.revision!==v.revision||p.checksum!==v.checksum||p.file!==v.file||p.publishedBy!==v.publishedBy||(v.action!=='backfill'&&(p.action!==v.action||(p.restoredFromRevision??null)!==(v.restoredFromRevision??null)||p.setCurrent!==v.setCurrent||(p.via??null)!==(v.via??null))))
+        X.push(nm+': os metadados não conferem com a publicação '+v.publicationId)}
     V.push({...v,d})});
-  (Array.isArray(o.months)?o.months:[]).forEach(m=>{if(!V.some(v=>v.key===m.key&&v.revision===m.revision))W.push(keyLabel(m.key)+': a revisão vigente r'+m.revision+' não está entre as versões válidas do backup')});
-  if(o.current&&!(o.months||[]).some(m=>m.key===o.current.period_key))W.push('a versão corrente ('+String(o.current.period_key)+') não aparece na lista de meses');
+  months.forEach(m=>{if(!m||!str(m.key))return;const v=V.find(x=>x.key===m.key&&x.revision===m.revision);
+    if(!v)X.push(keyLabel(m.key)+': a revisão vigente r'+m.revision+' não está entre as versões válidas do backup');
+    else if(v.checksum!==m.checksum||v.file!==m.file)X.push(keyLabel(m.key)+': a revisão vigente não confere com a versão r'+m.revision)});
+  if(o.current){const ck=o.current.key??o.current.period_key,m=months.find(x=>x&&x.key===ck);
+    if(!m)X.push('a versão corrente ('+String(ck)+') não aparece na lista de meses');
+    else if(v2&&o.current.checksum!==m.checksum)W.push('o ponteiro da versão corrente tem checksum diferente da revisão vigente de '+keyLabel(ck)+' (acontece quando o mês corrente é republicado sem marcar “versão corrente”)')}
   return{P,W,V}}
+// Estado de autenticidade do arquivo. loc = {contentSha256, shaOk} calculado no navegador (null = sem crypto.subtle);
+// srv = resposta de verify_backup (null = ainda não conferido). "autentico" SÓ com HMAC válido do conteúdo integral.
+const SBK_ST={
+  integridade:['er','Integridade inválida','O arquivo está corrompido ou tem estrutura inconsistente. Não pode ser usado.'],
+  legado:['na','Íntegro, mas sem autenticidade comprovada (backup legado, sem assinatura)','Formato 1, sem assinatura do servidor: a verificação acima detecta corrupção e alterações acidentais, mas não comprova a origem nem impede adulteração deliberada.'],
+  esquema_antigo:['na','Íntegro, mas sem autenticidade comprovada (esquema de assinatura antigo)','Este arquivo usa um esquema de assinatura que não cobre o conteúdo integral e não é mais conferido.'],
+  assinatura_ausente:['er','Assinatura inválida: a assinatura foi removida','Este formato (2) exige a assinatura do servidor, e ela não está no arquivo.'],
+  esquema_invalido:['er','Assinatura inválida: algoritmo ou esquema alterado','O envelope de assinatura não corresponde ao esquema '+SBK_SCHEME+' com '+SBK_ALG+'.'],
+  sem_calculo:['na','Íntegro, mas sem autenticidade comprovada','Este navegador não oferece o cálculo SHA-256 necessário para a conferência.'],
+  pendente:['in','Assinado pelo servidor: autenticidade ainda não conferida','Confira no servidor antes de usar os dados.'],
+  nao_configurado:['na','Autenticidade não comprovada: o servidor não tem a chave de assinatura configurada',''],
+  chave_desconhecida:['na','Autenticidade não comprovada: chave desconhecida','O arquivo foi assinado com uma chave que o servidor não conhece (antiga ou de outro ambiente).'],
+  invalida:['er','Assinatura inválida: alguma informação protegida foi alterada','O conteúdo do arquivo não corresponde ao que o servidor assinou.'],
+  autentico:['ok','Autêntico: todas as informações protegidas pela assinatura foram conferidas pelo servidor','']};
+function classifyBackup(o,ck,loc,srv){
+  if(ck.P.length||(loc&&!loc.shaOk))return'integridade';
+  if(o.version===1)return o.auth?'esquema_antigo':'legado';
+  const a=o.auth;if(!a||typeof a!=='object')return'assinatura_ausente';
+  if(a.alg!==SBK_ALG||a.scheme!==SBK_SCHEME||typeof a.keyId!=='string'||typeof a.sig!=='string')return'esquema_invalido';
+  if(!loc)return'sem_calculo';
+  if(loc.contentSha256!==a.contentSha256)return'integridade';
+  if(!srv)return'pendente';
+  if(srv.schemeOk===false)return'esquema_invalido';
+  if(!srv.keyKnown)return srv.configured?'chave_desconhecida':'nao_configurado';
+  return srv.valid===true?'autentico':'invalida'}
+// republicação: só backup autêntico; legado sem assinatura só com confirmação consciente; nunca nos demais estados
+const sbkCanRepublish=st=>st==='autentico'?'sim':st==='legado'||st==='esquema_antigo'?'confirmar':'nao';
 /*PURE2_END*/
 
 /* --- histórico em memória e ações --- */
@@ -1468,47 +1529,45 @@ function cardGestao(){const dk=pkeyOf(D.period),dm=dk?REMOTE_META.get(dk):null,c
 /* --- backup completo do servidor e verificação (prévia, sem gravar) --- */
 async function exportServerBackup(){const r=await edgeCall({action:'backup'});
   if(!r.ok){if(!r.cancelled)impBox('err','<span class="red">✕ Backup do servidor não gerado</span>',null,'servidor',[['bad',esc(r.reason)+'. Nada foi alterado.']]);return}
-  // o backup NUNCA é bloqueado: tudo o que está no servidor é salvo; versões com problema são listadas como aviso
-  const o=buildServerBackup(r.j),txt=JSON.stringify(o),ck=checkServerBackup(JSON.parse(txt)),nm=new Set(o.versions.map(v=>v.key)).size;
-  // confere se o JSON gravado no arquivo é o mesmo que o servidor resumiu (sha256 calculado pelo servidor)
-  const sh=await shaList(o.versions),dif=sh?o.versions.filter((v,i)=>v.sha256&&v.sha256!==sh[i]).map(v=>keyLabel(v.key)+' r'+v.revision+': conteúdo do arquivo diferente do enviado pelo servidor'):[];
-  await saveFile('backup_servidor_ftr_'+new Date().toISOString().slice(0,10)+'.json',txt,'application/json;charset=utf-8',`Backup do servidor com ${o.versions.length} versão(ões) de ${nm} mês(es)`);
-  const au=o.auth?['','🔏 Assinado pelo servidor ('+esc(o.auth.alg)+', chave '+esc(o.auth.keyId)+'): a autenticidade pode ser conferida depois, em “Verificar backup do servidor”.']:['amb','⚠ Sem assinatura do servidor: a verificação detecta corrupção e alterações acidentais, mas não comprova autenticidade nem impede adulteração deliberada.'];
-  const pr=[...ck.P,...dif];
-  if(pr.length||ck.W.length)impBox('warn','⚠ Backup do servidor salvo, com avisos',null,'servidor',[['',`Todas as ${o.versions.length} versões foram salvas no arquivo. A verificação encontrou itens para conferir:`],...pr.map(x=>['amb','⚠ '+esc(x)+' (esta versão não poderá ser republicada a partir do backup)']),...ck.W.map(x=>['amb','⚠ '+esc(x)]),au,['','O backup guarda os dados lidos das planilhas, não os arquivos Excel originais.']]);
-  else impBox('ok','✓ Backup do servidor salvo',null,'servidor',[['',`${o.versions.length} versão(ões) de ${nm} mês(es), com verificação de integridade.`],au,['','O backup guarda os dados lidos das planilhas, não os arquivos Excel originais.']])}
-// sha256 (hex) do dataJson de cada versão, calculado no navegador. null se o navegador não oferece crypto.subtle.
-async function shaList(vs){if(!(window.crypto&&crypto.subtle))return null;const e=new TextEncoder();
-  return Promise.all(vs.map(async v=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',e.encode(typeof v.dataJson==='string'?v.dataJson:JSON.stringify(v.data))))].map(x=>x.toString(16).padStart(2,'0')).join('')))}
+  // o arquivo é montado e (com a chave configurada) assinado pelo SERVIDOR; o navegador só confere e salva.
+  // O backup NUNCA é bloqueado: tudo o que está no servidor é salvo; problemas viram avisos.
+  const o=r.j.backup||buildServerBackup(r.j),txt=JSON.stringify(o),b=JSON.parse(txt),ck=checkServerBackup(b),loc=await localDigest(b),st=classifyBackup(b,ck,loc,null);
+  const nm=new Set(b.versions.map(v=>v.key)).size;
+  await saveFile('backup_servidor_ftr_'+new Date().toISOString().slice(0,10)+'.json',txt,'application/json;charset=utf-8',`Backup do servidor com ${b.versions.length} versão(ões) de ${nm} mês(es)`);
+  const au=b.version===2&&b.auth?['','🔏 Assinado pelo servidor ('+esc(b.auth.alg)+', chave '+esc(b.auth.keyId)+'), cobrindo o conteúdo integral do arquivo. Para comprovar a autenticidade depois, use “Verificar backup do servidor”.']
+    :['amb','⚠ Formato 1, sem assinatura (o servidor não tem a chave de assinatura configurada): a verificação detecta corrupção e alterações acidentais, mas não comprova autenticidade.'];
+  const pr=[...ck.P,...(loc&&loc.errs||[])],xl=['','O backup guarda os dados lidos das planilhas, não os arquivos Excel originais.'];
+  if(st==='integridade'||ck.W.length)impBox('warn','⚠ Backup do servidor salvo, com avisos',null,'servidor',[['',`Todas as ${b.versions.length} versões foram salvas no arquivo. A verificação encontrou itens para conferir:`],...pr.map(x=>['amb','⚠ '+esc(x)]),...ck.W.map(x=>['amb','⚠ '+esc(x)]),au,xl]);
+  else impBox('ok','✓ Backup do servidor salvo',null,'servidor',[['',`${b.versions.length} versão(ões) de ${nm} mês(es); estrutura e integridade conferidas.`],au,xl])}
+// Resumos calculados NO NAVEGADOR: sha256 de cada versão (confere com o registrado) e sha256 do JSON canônico do
+// arquivo inteiro sem "auth" (o que o servidor assinou). null = navegador sem crypto.subtle.
+async function sha256Hex(s){return[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))].map(x=>x.toString(16).padStart(2,'0')).join('')}
+async function localDigest(o){if(!(window.crypto&&crypto.subtle))return null;const errs=[];
+  try{for(const v of (o&&Array.isArray(o.versions)?o.versions:[]))if(v&&typeof v.dataJson==='string'&&v.sha256!=null&&(await sha256Hex(v.dataJson))!==v.sha256)errs.push(keyLabel(v.key)+' r'+v.revision+': o sha256 registrado não confere com os dados');
+    return{contentSha256:await sha256Hex(jcs(backupBody(o))),shaOk:!errs.length,errs}}
+  catch(e){return{contentSha256:null,shaOk:false,errs:['estrutura inválida para a representação canônica ('+(e.message||e)+')']}}}
 async function onServerBackupFile(f){let obj;try{obj=JSON.parse(await f.text())}catch(e){impBox('err','<span class="red">✕ Backup ilegível</span>',null,f.name,[['bad','O arquivo não é um JSON válido. Nada foi alterado.']]);return}
-  const base=checkServerBackup(obj),SH=base.V.length?await shaList(base.V):null;let AU=null; // AU = resposta da conferência de autenticidade no servidor
-  for(;;){const P=[...base.P],W=[...base.W],V=[];
-    base.V.forEach((v,i)=>{if(SH&&v.sha256&&v.sha256!==SH[i]){P.push(keyLabel(v.key)+' r'+v.revision+': o sha256 registrado não confere com os dados (arquivo alterado ou corrompido)');return}V.push({...v,sha:SH?SH[i]:null})});
-    const signed=!!(obj&&obj.auth&&obj.auth.alg),avOf=v=>AU&&AU.versions?AU.versions.find(x=>x.key===v.key&&x.revision===v.revision):null;
-    const authOk=v=>!AU||!AU.signed||!AU.keyKnown||(avOf(v)||{}).valid===true;
-    const auth=!signed?`<p class="ambt">⚠ Autenticidade não comprovada: este arquivo não tem assinatura do servidor. A verificação de integridade detecta corrupção e alterações acidentais, mas <b>não</b> comprova que o arquivo foi gerado por este servidor nem impede adulteração deliberada (quem altera os dados pode recalcular o valor de integridade).</p>`
-      :!AU?`<p>🔏 Arquivo assinado pelo servidor (${esc(obj.auth.alg)}, chave ${esc(obj.auth.keyId)}). <button class="btn alt sm" data-dr="au">Conferir autenticidade no servidor</button> <span class="mut">(requer login de publicador; envia só identificadores e resumos sha256, não os dados)</span></p>`
-      :!AU.configured?'<p class="ambt">⚠ O servidor não tem a assinatura de backups configurada: não é possível comprovar a autenticidade deste arquivo.</p>'
-      :!AU.keyKnown?`<p class="ambt">⚠ O arquivo foi assinado com a chave “${esc(obj.auth.keyId)}”, que não é a chave atual do servidor (“${esc(AU.keyId)}”): autenticidade não comprovada.</p>`
-      :AU.manifestValid&&V.every(authOk)?'<p class="grn">✓ Autêntico: as assinaturas de todas as versões e da lista de versões foram conferidas pelo servidor.</p>'
-      :`<p class="bad2">✕ Assinatura inválida${AU.manifestValid?'':' (a lista de versões ou os dados de exportação foram alterados)'}: ${V.filter(v=>!authOk(v)).length} versão(ões) não conferem. Essas versões não podem ser republicadas.</p>`;
-    const rows=V.map((v,i)=>{const rm=REMOTE_META.get(v.key),st=!rm?tag('MÊS NÃO PUBLICADO NO SERVIDOR','er'):rm.revision===v.revision&&rm.checksum===v.checksum?tag('VIGENTE NO SERVIDOR','ok'):tag('DIFERENTE DA VIGENTE (r'+rm.revision+')','na');
-      const av=avOf(v),at=av?(av.valid?tag('✓ autêntica','ok'):tag('✕ assinatura inválida','er')):'';
-      return`<tr><td class="l"><b>${esc(keyLabel(v.key))}</b></td><td>r${v.revision}</td><td class="l">${esc(ACT[v.action]||v.action)}</td><td class="l">${esc(v.file)}</td><td>${esc(fmtDt(v.publishedAt))}</td><td class="l">${esc(v.publishedBy||'')}</td><td>${tag('✓ íntegra','ok')} ${at}</td><td class="l">${st}</td><td class="l">${authOk(v)?`<button class="btn alt sm" data-dr="rp:${i}">Republicar como nova revisão</button>`:'—'}</td></tr>`}).join('');
-    const a=await dlg(`<h3>Verificar backup do servidor (prévia)</h3><p class="mut">Arquivo <b>${esc(f.name)}</b>${obj&&obj.exportedAt?' · exportado em '+esc(fmtDt(obj.exportedAt)):''}${obj&&obj.exportedBy?' por '+esc(obj.exportedBy):''} · ${V.length} versão(ões) válida(s)${obj&&Array.isArray(obj.versions)?' de '+obj.versions.length:''}</p>
-      ${P.length?`<p class="bad2">✕ Problemas (${P.length}): o arquivo não pode ser usado</p><ul class="rvl e">${P.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:'<p class="grn">✓ Integridade e estrutura verificadas em todas as versões (detecta corrupção e alterações acidentais).</p>'}
-      ${W.length?`<ul class="rvl w">${W.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:''}
-      ${P.length?'':auth}
-      ${!P.length&&rows?`<div class="sc mh"><table class="cmp"><tr><th>Mês</th><th>Revisão</th><th>Operação</th><th>Arquivo de origem (nome)</th><th>Publicada em</th><th>Por</th><th>Verificação</th><th>Situação no servidor</th><th>Ação</th></tr>${rows}</table></div>`:''}
-      <p class="leg" style="margin:8px 0 0">A verificação não grava nada. O backup contém os dados lidos das planilhas, não os arquivos Excel originais. Para voltar a uma versão que ainda existe no servidor, prefira “Versões publicadas”. Republicar a partir do backup cria uma <b>nova revisão</b> (nada é apagado) e passa pelas mesmas validações de uma importação.</p>`,[['x','Fechar','alt']],true);
-    if(a==='au'){if(!SH){await dlg('<h3>Autenticidade</h3><p class="bad2">Este navegador não oferece o cálculo sha256 necessário para a conferência.</p>',[['x','Voltar','']]);continue}
-      const r=await edgeCall({action:'verify_backup',auth:obj.auth,exportedAt:obj.exportedAt,exportedBy:obj.exportedBy,versions:V.map(v=>({key:v.key,revision:v.revision,checksum:v.checksum,sha256:v.sha,sig:v.sig}))});
-      if(r.ok)AU=r.j;else if(!r.cancelled)await dlg(`<h3>Autenticidade não conferida</h3><p class="bad2">${esc(r.reason)}</p>`,[['x','Voltar','']]);
+  const ck=checkServerBackup(obj),loc=await localDigest(obj),isObj=obj&&typeof obj==='object';let srv=null;
+  for(;;){const st=classifyBackup(isObj?obj:{},ck,loc,srv),[cls,lab,desc]=SBK_ST[st],can=sbkCanRepublish(st),V=ck.V;
+    const P=[...ck.P,...(loc&&loc.errs||[])];if(st==='integridade'&&!P.length)P.push('o resumo SHA-256 do conteúdo não confere com o registrado na assinatura (arquivo alterado ou corrompido)');
+    const integ=st==='integridade'?`<p class="bad2">✕ Integridade inválida (${P.length}): o arquivo não pode ser usado</p><ul class="rvl e">${P.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`
+      :'<p>✓ Estrutura e integridade conferidas <span class="mut">(detecta corrupção e alterações acidentais; sozinha, não comprova autenticidade)</span>.</p>';
+    const auth=st==='integridade'?'':`<div class="sbkst ${cls}"><b>${esc(lab)}.</b>${desc?' '+esc(desc):''}${st==='pendente'?` <button class="btn sm" data-dr="au">Conferir autenticidade no servidor</button> <span class="mut">(requer login de publicador; envia só o envelope da assinatura e o resumo SHA-256, não os dados)</span>`:''}${st==='autentico'&&srv&&srv.keyCurrent===false?' <span class="mut">(assinado com a chave anterior “'+esc(obj.auth.keyId)+'”)</span>':''}</div>`;
+    const rows=st==='integridade'?'':V.map((v,i)=>{const rm=REMOTE_META.get(v.key),sv=!rm?tag('MÊS NÃO PUBLICADO NO SERVIDOR','er'):rm.revision===v.revision&&rm.checksum===v.checksum?tag('VIGENTE NO SERVIDOR','ok'):tag('DIFERENTE DA VIGENTE (r'+rm.revision+')','na');
+      return`<tr><td class="l"><b>${esc(keyLabel(v.key))}</b></td><td>r${v.revision}</td><td class="l">${esc(ACT[v.action]||v.action)}${v.via==='v1'&&v.action==='publish'?' '+tag('PAINEL ANTIGO','na'):''}</td><td class="l">${esc(v.file)}</td><td>${esc(fmtDt(v.publishedAt))}</td><td class="l">${esc(v.publishedBy||'')}</td><td class="l">${sv}</td><td class="l">${can==='nao'?'<span class="mut">bloqueado</span>':`<button class="btn alt sm" data-dr="rp:${i}">Republicar como nova revisão</button>`}</td></tr>`}).join('');
+    const a=await dlg(`<h3>Verificar backup do servidor (prévia)</h3><p class="mut">Arquivo <b>${esc(f.name)}</b>${isObj&&obj.exportedAt?' · exportado em '+esc(fmtDt(obj.exportedAt)):''}${isObj&&obj.exportedBy?' por '+esc(obj.exportedBy):''} · formato ${esc(String(isObj?obj.version:'?'))} · ${V.length} versão(ões) válida(s)${isObj&&Array.isArray(obj.versions)?' de '+obj.versions.length:''}</p>
+      ${integ}${ck.W.length?`<ul class="rvl w">${ck.W.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul>`:''}${auth}
+      ${rows?`<div class="sc mh"><table class="cmp"><tr><th>Mês</th><th>Revisão</th><th>Operação</th><th>Arquivo de origem (nome)</th><th>Publicada em</th><th>Por</th><th>Situação no servidor</th><th>Ação</th></tr>${rows}</table></div>`:''}
+      <p class="leg" style="margin:8px 0 0">A verificação não grava nada. O backup contém os dados lidos das planilhas, não os arquivos Excel originais. Republicar só é liberado para backup <b>autêntico</b> (ou legado sem assinatura, com confirmação consciente) e cria uma <b>nova revisão</b>, pelas mesmas validações de uma importação; nada é apagado. Para voltar a uma versão que ainda existe no servidor, prefira “Versões publicadas”.</p>`,[['x','Fechar','alt']],true);
+    if(a==='au'){const r=await edgeCall({action:'verify_backup',auth:obj.auth,contentSha256:loc.contentSha256});
+      if(r.ok)srv=r.j;else if(!r.cancelled)await dlg(`<h3>Autenticidade não conferida</h3><p class="bad2">${esc(r.reason)}</p>`,[['x','Voltar','']]);
       continue}
-    if(!a||!a.startsWith('rp:')||P.length)return;
-    const v=V[+a.slice(3)],rm=REMOTE_META.get(v.key);if(!authOk(v))continue;
-    const c=await dlg(`<h3>Republicar ${esc(keyLabel(v.key))} a partir do backup?</h3><p>Os dados da r${v.revision} do backup (${esc(v.file)}) serão publicados como <b>revisão ${rm?rm.revision+1:1}</b>. ${rm?'A revisão vigente r'+rm.revision+' continua no histórico.':'Este mês ainda não está publicado.'}</p>${!signed?'<p class="ambt">⚠ Arquivo sem assinatura: a autenticidade destes dados não foi comprovada.</p>':!AU?'<p class="ambt">⚠ A autenticidade ainda não foi conferida no servidor.</p>':''}`,[['ok','Republicar',''],['x','Cancelar','alt']]);
+    if(!a||!a.startsWith('rp:')||can==='nao')return;
+    const v=V[+a.slice(3)],rm=REMOTE_META.get(v.key);
+    const c=await dlg(`<h3>Republicar ${esc(keyLabel(v.key))} a partir do backup?</h3><p>Os dados da r${v.revision} do backup (${esc(v.file)}) serão publicados como <b>revisão ${rm?rm.revision+1:1}</b>. ${rm?'A revisão vigente r'+rm.revision+' continua no histórico.':'Este mês ainda não está publicado.'}</p>${can==='confirmar'?`<p class="ambt">⚠ ${esc(lab)}. Os dados podem ter sido alterados sem que isso seja detectável.</p><label class="rvcb"><input type="checkbox" id="sbkack"> Entendo que a autenticidade deste backup não foi comprovada e quero republicar mesmo assim</label>`:'<p class="grn">✓ Backup autêntico: assinatura do conteúdo integral conferida pelo servidor.</p>'}`,[['ok','Republicar',''],['x','Cancelar','alt']]);
+    const ackd=!!($('sbkack')&&$('sbkack').checked);
     if(c!=='ok')continue;
+    if(can==='confirmar'&&!ackd){await dlg('<h3>Não republicado</h3><p>Marque a confirmação de que a autenticidade não foi comprovada para continuar.</p>',[['x','Voltar','']]);continue}
     const pr=await publishData(v.d,v.key,v.file,PUBINFO.key===v.key||!PUBINFO.key,rm?rm.revision:0);
     if(pr.ok){say(keyLabel(v.key)+' republicado como revisão '+pr.revision+'.');await syncRemote({manual:true});return}
     await dlg(`<h3>Não republicado</h3><p class="bad2">${esc(pubMsg(pr))}</p>`,[['x','Voltar','']])}}

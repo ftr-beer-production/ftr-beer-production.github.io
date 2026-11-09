@@ -127,26 +127,102 @@ Os caminhos são: Menu ▸ **Versões publicadas**, ou o botão **Versões** no 
 
 ## 6. Backup: integridade e autenticidade
 
-**Backup completo do servidor** (só publicadores): um arquivo `.json` com todas as versões, meses, publicações e a versão corrente. O backup **nunca é bloqueado**. Se alguma versão tiver problema, o arquivo é salvo assim mesmo e o problema aparece como aviso.
+**Backup completo do servidor** (só publicadores): o arquivo `.json` é **montado pela Edge Function**; o navegador só confere e salva. O backup **nunca é bloqueado**: problemas aparecem como aviso.
 
-**Verificar backup do servidor**: abre o arquivo e confere formato, integridade, períodos, duplicidades e dados, **sem gravar nada**. A partir da prévia, um publicador pode republicar uma versão do backup. Ela entra como **nova revisão**, pelo fluxo moderno, nunca por cima do histórico.
+**Verificar backup do servidor**: abre o arquivo e confere estrutura, integridade, correspondências e, quando houver assinatura, a autenticidade no servidor, **sem gravar nada**.
 
-### Integridade não é autenticidade
+### 6.1 Formatos
 
-| | O que é | O que garante | O que NÃO garante |
+| Formato | Quando é gerado | Assinatura | Como a tela trata |
 |---|---|---|---|
-| **Integridade** (`integrity` = FNV-1a e `sha256` de cada versão) | Valores calculados sobre o JSON de cada versão | Detecta **corrupção** e **alterações acidentais** (arquivo truncado, edição manual sem recalcular) | **Não** é prova de origem. Quem altera os dados de propósito pode recalcular o FNV e o sha256, e o arquivo passa na integridade. |
-| **Autenticidade** (`auth` + `sig`, HMAC-SHA256) | Assinatura feita **pelo servidor** com um segredo que nunca sai do Supabase | Comprova que as versões e a lista de versões foram exportadas por este servidor e não foram alteradas depois, mesmo com recálculo | Só existe se o segredo `PAINEL_BACKUP_HMAC_KEY` estiver configurado (**depende da sua autorização**). Backups antigos ou sem assinatura não têm essa garantia. |
+| **2** | Servidor com `PAINEL_BACKUP_HMAC_KEY` configurado | **Obrigatória**: HMAC-SHA256 do conteúdo integral (`auth`) | "Autêntico" somente depois de o servidor conferir a assinatura |
+| **1** | Backups antigos, e servidor sem o segredo | Nenhuma | Lido normalmente, mas sempre "sem autenticidade comprovada (backup legado)" |
 
-Como funciona a assinatura (preparada, testada, **não configurada**):
-- No backup, a Edge Function calcula o sha256 do JSON de cada versão e assina `versão|período|revisão|checksum|sha256`. Também assina um **manifesto** com a data, quem exportou e a lista de versões, o que detecta versões removidas ou acrescentadas.
-- O navegador nunca recebe o segredo, só as assinaturas, que ele não consegue recalcular.
-- Para conferir, o painel calcula localmente o sha256 dos dados do arquivo e envia **só** identificadores, sha256 e assinaturas para a ação `verify_backup`. Os dados não são enviados. A Edge recalcula as assinaturas (comparação em tempo constante) e responde versão por versão.
-- Uma versão com assinatura inválida **não pode ser republicada** a partir do backup.
-- Sem o segredo, o backup sai com `auth: null`, a verificação de integridade continua funcionando, e a interface diz claramente: "Autenticidade não comprovada".
-- **Compatibilidade:** o formato continua `version: 1`. Os campos `auth`, `sha256`, `sig` e `via` são opcionais, e backups antigos continuam sendo verificados normalmente.
-- **Rotação de chave:** `PAINEL_BACKUP_HMAC_KEY_ID` identifica a chave. Backups assinados com outra chave aparecem como "assinado com outra chave: autenticidade não comprovada". Guarde a chave antiga se quiser continuar conferindo backups antigos.
-- **Limite:** a assinatura usa um segredo simétrico (HMAC), então só o servidor confere. Uma assinatura digital assimétrica (Ed25519) permitiria conferir sem o servidor, mas exigiria guardar uma chave privada no servidor e publicar a pública. Não foi necessário para o uso atual.
+O formato 1 com o envelope do esquema anterior (`ftr-painel-backup-v1`, que assinava só versões e um manifesto parcial e nunca foi implantado) é tratado como "esquema de assinatura antigo": também sem autenticidade comprovada.
+
+### 6.2 Canonicalização
+
+A assinatura é calculada sobre o **JSON canônico RFC 8785 (JCS)** do arquivo inteiro, **exceto o envelope `auth`** (para evitar recursão):
+- propriedades dos objetos ordenadas por unidades UTF-16, em todos os níveis;
+- arrays preservados na ordem original (por isso trocar a ordem das versões invalida a assinatura);
+- números no formato do ECMAScript (o mesmo de `JSON.stringify`): `4.50` vira `4.5`, `1E30` vira `1e+30`, `-0` vira `0`;
+- textos com o escape do `JSON.stringify`, com acentos e emoji preservados em UTF-8;
+- recusados: números não finitos, `undefined`, funções, objetos não simples (como datas) e textos com surrogates Unicode isolados.
+
+A mesma função existe na Edge Function (`canonical`) e no painel (`jcs`). Um teste confere que as duas produzem o mesmo texto, inclusive nos vetores de exemplo da RFC 8785. Os dados de cada versão vão no arquivo como texto (`dataJson`), então seus números não passam por reformatação.
+
+### 6.3 Assinatura (no servidor)
+
+1. A Edge monta o conteúdo completo (seção 6.4).
+2. `contentSha256` = SHA-256 do JSON canônico desse conteúdo.
+3. `sig` = HMAC-SHA256(segredo, `ftr-painel-backup-v2` ⏎ `HMAC-SHA256` ⏎ `<keyId>` ⏎ `<contentSha256>`). Esquema, algoritmo e identificador da chave fazem parte da mensagem assinada: trocar qualquer um deles invalida a assinatura.
+4. O arquivo recebe `auth = {alg, scheme, keyId, contentSha256, sig}`.
+
+O segredo existe só nos segredos da Edge Function. Ele nunca vai para o JavaScript público, o HTML, o GitHub Pages ou as respostas da API (os testes procuram o segredo em todas as respostas).
+
+### 6.4 Campos protegidos
+
+**Todos os campos do arquivo**, exceto o próprio envelope `auth`. Acrescentar, remover ou alterar qualquer campo, em qualquer nível, invalida a assinatura.
+
+| Parte | Campos |
+|---|---|
+| Informações gerais | `format`, `version`, `dataFormat`, `exportedAt`, `exportedBy` |
+| Versão corrente (`current`) | `key`, `file`, `checksum`, `publishedAt` |
+| Meses (`months[]`) | `key`, `revision` (vigente), `checksum`, `file`, `publishedAt`; e a própria lista |
+| Publicações (`publications[]`) | `id`, `key`, `revision`, `file`, `checksum`, `publishedBy`, `publishedAt`, `setCurrent`, `replaced`, `action`, `restoredFromRevision`, `via`; e a lista com sua ordem |
+| Versões (`versions[]`) | `id`, `publicationId`, `key`, `revision`, `file`, `checksum`, `publishedBy`, `publishedAt`, `createdAt`, `action`, `restoredFromRevision`, `setCurrent`, `via`, `integrity` (FNV-1a), `sha256`, `dataJson` (dados interpretados completos), `summaryJson` (resumo dos indicadores); e a lista com sua ordem |
+| Envelope (`auth`) | Não é assinado (é a assinatura). Mas `alg`, `scheme` e `keyId` entram na mensagem do HMAC, e `contentSha256` é conferido. |
+
+Como a associação entre cada versão e seus metadados está toda no mesmo conteúdo assinado, trocar dados de uma versão para outra também invalida a assinatura.
+
+### 6.5 Verificação
+
+1. **No navegador:**
+   - estrutura e integridade: formato, FNV-1a e sha256 de cada versão, dados válidos, versões duplicadas;
+   - correspondências: versão ↔ publicação (mesmo período, revisão, arquivo, checksum, publicador, operação, origem, caminho e corrente), mês ↔ versão vigente, e mês corrente na lista de meses;
+   - cálculo do SHA-256 canônico do arquivo sem `auth`, comparado com o `contentSha256` registrado.
+2. **No servidor** (`verify_backup`, só publicadores): o navegador envia o envelope `auth` e o SHA-256 **que ele mesmo calculou**, sem os dados. O servidor **não confia** nesse resumo: recalcula o HMAC sobre ele e compara com `sig`, em tempo constante. Quem adultera o arquivo consegue recalcular os SHA-256, mas não produzir um HMAC válido sem o segredo.
+3. "Autêntico" só aparece quando os dois passos passam.
+
+Estados mostrados na tela:
+
+| Estado | Significa | Republicar |
+|---|---|---|
+| **Autêntico** | HMAC do conteúdo integral conferido pelo servidor | Liberado |
+| **Assinatura inválida: alguma informação protegida foi alterada** | O conteúdo não corresponde ao que o servidor assinou | Bloqueado |
+| **Assinatura inválida: a assinatura foi removida** | Formato 2 sem `auth` | Bloqueado |
+| **Assinatura inválida: algoritmo ou esquema alterado** | Envelope diferente de `ftr-painel-backup-v2` / `HMAC-SHA256` | Bloqueado |
+| **Assinado pelo servidor: autenticidade ainda não conferida** | Falta clicar em "Conferir autenticidade no servidor" | Bloqueado até conferir |
+| **Autenticidade não comprovada: chave desconhecida** | Assinado com uma chave que o servidor não tem (antiga ou de outro ambiente) | Bloqueado |
+| **Autenticidade não comprovada: o servidor não tem a chave configurada** | Formato 2, mas o servidor está sem segredo | Bloqueado |
+| **Íntegro, mas sem autenticidade comprovada (backup legado, sem assinatura)** | Formato 1 | Só com confirmação consciente (caixa "Entendo que a autenticidade deste backup não foi comprovada") |
+| **Integridade inválida** | Arquivo corrompido, estrutura ou correspondências inconsistentes, ou resumo diferente do registrado | Bloqueado |
+
+### 6.6 Republicação a partir do backup
+
+- Só para backup **autêntico** (verificado no servidor nesta mesma tela) ou **legado** com confirmação explícita.
+- Nunca para backup com assinatura inválida, assinatura removida, chave desconhecida ou integridade inválida.
+- Sempre cria uma **nova revisão**, pelo fluxo moderno (revisão esperada, conteúdo idêntico e validação da Edge Function). Nada é apagado ou sobrescrito.
+
+### 6.7 Limitações que continuam
+
+- **Rebaixamento para legado:** quem tira a assinatura de um backup formato 2 **e** muda `version` para 1 obtém um arquivo que a tela mostra como "backup legado, sem assinatura". Ele **nunca** aparece como autêntico, e republicar exige confirmação consciente. Mas o sistema não consegue provar que aquele arquivo já foi assinado: sem assinatura, não há o que conferir.
+- **O bloqueio da republicação é da interface.** Um publicador autorizado sempre pode publicar dados novos pelo fluxo normal (importando uma planilha). A assinatura protege a confiança no **backup**, não substitui a autorização de publicar.
+- **HMAC é simétrico:** só o servidor confere; não há verificação offline. Uma assinatura assimétrica (Ed25519) permitiria isso, mas exigiria gerir uma chave privada e publicar a pública. Não foi necessário.
+- **Sem o segredo, não há autenticidade:** a integridade detecta corrupção e alterações acidentais, mas não adulteração deliberada com recálculo.
+- **Perda da chave:** backups assinados com uma chave perdida não podem mais ser autenticados. Não há como recuperar ou refazer essas assinaturas; os arquivos continuam legíveis, como não autenticados.
+
+### 6.8 Rotação de chaves
+
+1. Gerar uma chave nova: `openssl rand -hex 32` (no mínimo 32 caracteres aleatórios).
+2. Escolher um identificador novo, por exemplo `k2027`.
+3. Guardar a chave atual em `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS`, como JSON `{"k2026":"<segredo antigo>"}`. Ela será usada **só para conferir** backups antigos, nunca para assinar.
+4. Configurar `PAINEL_BACKUP_HMAC_KEY` com a chave nova e `PAINEL_BACKUP_HMAC_KEY_ID` com o identificador novo.
+5. A partir daí, backups novos saem com `k2027`. Backups `k2026` aparecem como "Autêntico (assinado com a chave anterior)" enquanto ela estiver em `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS`. Sem ela, aparecem como "chave desconhecida".
+6. Riscos:
+   - perder uma chave torna impossível autenticar os backups dela;
+   - substituir a chave sem guardar a anterior tem o mesmo efeito;
+   - vazar uma chave permite forjar backups com aquele `keyId`. Nesse caso, remova-a também de `PAINEL_BACKUP_HMAC_PREVIOUS_KEYS` e trate os backups dela como não autenticados.
 
 ## 7. Exportações
 
@@ -187,9 +263,9 @@ Para rodar todos: `bash tests/executar_todos.sh`. Nada é enviado ao Supabase de
 | Suíte | O que cobre |
 |---|---|
 | `tests/sql/executar.sh` | PostgreSQL temporário com o esquema real e dados fictícios espelhando a produção. Cobre: migration aplicada 2×; T1–T15 (carga inicial; permissões; publicação; idêntico; revisão esperada obrigatória; revisão desatualizada; recuperação; idêntico na recuperação por checksum, por JSONB e por JSONB com outra ordem de chaves; histórico só-inclusão; v1 compatível e capturada com `via`; atomicidade; ponteiro corrente; coerência); duas publicações simultâneas; recuperação durante uma publicação; captura do caminho legado; rollback completo (histórico, índices, sequência, privacidade, v1); reaplicação; e confirmação de que só objetos `painel_*` são criados. |
-| `tests/edge.test.mjs` | A Edge Function real com fetch simulado. Cobre: origem, login, publicador (todas as ações, inclusive `verify_backup`); fluxo moderno com e sem revisão esperada; v2 ausente e falha de rede sem cair para a v1; corpo exato do painel antigo pela v1, identificado como legado; desligamento do legado; recuperação sempre com revisão esperada; backup sem e com assinatura; adulteração, versão removida e chave diferente na conferência; nenhum segredo nas respostas. |
-| `tests/painel.test.mjs` | Regressão contra `main` (`parseWorkbook`, `jsonOf`, checksum, resumo) e as funções novas (revisão da importação, exportações, CSV, células do Excel, backup, campos de autenticidade opcionais, limitação do FNV com recálculo). |
-| `tests/e2e/painel.e2e.mjs` | Navegador real com o painel, a Edge real e o banco temporário (41 verificações). Cobre: consulta pública; revisão da importação; publicação moderna (v2); idêntico; versões e recuperação; concorrência; usuário não autorizado; Excel e CSV; backup assinado; autenticidade conferida; edição acidental; adulteração deliberada com recálculo (passa na integridade e é barrada pela assinatura); backup sem assinatura; gráficos; histórico; PDF; modo TV; **o painel atual de produção (`main`) publicando pela Edge nova com a migration**, capturado no histórico como `via = v1`; nenhum erro de JS. |
+| `tests/edge.test.mjs` | A Edge Function real com fetch simulado, mais as funções puras do painel (lado do navegador). Cobre: origem, login, publicador (todas as ações, inclusive `verify_backup`); fluxo moderno com e sem revisão esperada; v2 ausente e falha de rede sem cair para a v1; corpo exato do painel antigo pela v1, identificado como legado; desligamento do legado; recuperação sempre com revisão esperada; JSON canônico idêntico na Edge e no painel; backup formato 1 (sem segredo) e formato 2 (assinado); **23 cenários de adulteração** com FNV-1a e SHA-256 recalculados, todos recusados; ordem de propriedades (continua autêntico); remoção, chave, algoritmo, esquema, resumo e assinatura forjada; rebaixamento para legado; rotação de chave; nenhum segredo nas respostas. |
+| `tests/painel.test.mjs` | Regressão contra `main` (`parseWorkbook`, `jsonOf`, checksum, resumo) e as funções novas (revisão da importação, exportações, CSV, células do Excel, backup, limitação do FNV com recálculo, backup legado, vetores da RFC 8785 e todos os estados de autenticidade). |
+| `tests/e2e/painel.e2e.mjs` | Navegador real com o painel, a Edge real e o banco temporário (46 verificações). Cobre: consulta pública; revisão da importação; publicação moderna (v2); idêntico; versões e recuperação; concorrência; usuário não autorizado; Excel e CSV; backup formato 2 assinado; republicação bloqueada até conferir; autenticidade conferida e republicação como nova revisão; edição sem recalcular (integridade inválida); adulteração de metadados com hashes recalculados (assinatura inválida); assinatura removida; chave desconhecida; legado com confirmação consciente; gráficos; histórico; PDF; modo TV; **o painel atual de produção (`main`) publicando pela Edge nova com a migration**, capturado no histórico como `via = v1`; nenhum erro de JS. |
 
 No e2e, a biblioteca SheetJS (cdnjs) é substituída por um simulador, porque o ambiente de teste não acessa a internet. Em produção, o painel usa a SheetJS real, como antes. O segredo HMAC do e2e é fictício e só existe no teste.
 
@@ -200,4 +276,4 @@ No e2e, a biblioteca SheetJS (cdnjs) é substituída por um simulador, porque o 
 3. Importar a mesma planilha já publicada: aparece "Conteúdo idêntico".
 4. Versões publicadas ▸ mês vigente: a revisão vigente aparece marcada, e as revisões antigas sem dados aparecem em "anteriores ao histórico (somente metadados)".
 5. Exportar Excel e CSV e abrir no Excel: números, % e datas corretos, sem fórmulas.
-6. Backup completo do servidor e depois Verificar backup: "Integridade e estrutura verificadas". Com o segredo configurado, "Conferir autenticidade no servidor" deve mostrar "Autêntico".
+6. Backup completo do servidor e depois Verificar backup. Sem o segredo, deve aparecer "Íntegro, mas sem autenticidade comprovada (backup legado…)". Com o segredo configurado, "Conferir autenticidade no servidor" deve mostrar "Autêntico".

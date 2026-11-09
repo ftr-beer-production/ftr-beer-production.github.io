@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import vm from 'node:vm';
+import { ambiente } from './lib/painel.mjs';
 import { planilha } from './fixtures/planilha.mjs';
 
 // valores criados dentro do contexto vm têm outro protótipo: compara pelo conteúdo
@@ -14,18 +14,6 @@ const plain = (x) => JSON.parse(JSON.stringify(x));
 const eq = (a, b, m) => assert.deepEqual(plain(a), plain(b), m);
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HTML = readFileSync(join(RAIZ, 'docs/index.html'), 'utf8');
-const bloco = (src, a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, 'bloco ' + a); return src.slice(i, j); };
-const linha = (src, re) => { const m = re.exec(src); assert.ok(m, String(re)); return m[0]; };
-// Ambiente com o bloco puro + as definições de que o bloco PURE2 depende (copiadas do próprio painel)
-function ambiente(src) {
-  const code = bloco(src, '/*PURE_START*/', '/*PURE_END*/') + '\n' +
-    linha(src, /const DBN='ftr-painel',STORE='imports',FMT=2;/) + '\n' + linha(src, /function fnv\(s\)\{[^\n]*/) + '\n' + linha(src, /const jsonOf=[^\n]*/) + '\n' +
-    linha(src, /function validateData\(d\)\{[\s\S]*?return null\}/) + '\n' + (src.includes('/*PURE2_START*/') ? bloco(src, '/*PURE2_START*/', '/*PURE2_END*/') : '') +
-    '\n;globalThis.__ = {parseWorkbook,summarize,pkeyOf,keyLabel,stageReadings,mkReadingsOf,chk,mkReadings,fnv,jsonOf,validateData,FMT,SLOTS,' +
-    (src.includes('reviewImport') ? 'reviewImport,summaryDiff,periodFromName,exportTables,csvCell,toCsv,sheetCells,xlSerial,buildServerBackup,checkServerBackup,fnv' : '') + '}';
-  const ctx = vm.createContext({ console, Intl, Date, Math, JSON, Object, Array, String, Number, Set, Map, RegExp, isFinite, isNaN, parseFloat });
-  vm.runInContext(code, ctx); return ctx.__;
-}
 const N = ambiente(HTML);
 let ANT = null; // versão anterior (main), para regressão
 try { ANT = ambiente(execFileSync('git', ['-C', RAIZ, 'show', 'main:docs/index.html'], { encoding: 'utf8', maxBuffer: 1 << 26 })); } catch (_) { ANT = null; }
@@ -142,17 +130,56 @@ test('backup do servidor: gerado, validado e com integridade verificada', () => 
   eq(N.checkServerBackup(recalc).P, []);
 });
 
-test('backup do servidor: campos de autenticidade opcionais e compatibilidade com backups antigos', () => {
-  const resp = { exportedAt: 't', exportedBy: 'p@x', auth: { alg: 'HMAC-SHA256', keyId: 'k1', scheme: 'ftr-painel-backup-v1', manifestSig: 'a'.repeat(64) },
-    months: [{ period_key: '2026-10', revision: 1 }], publications: [],
-    versions: [{ period_key: '2026-10', revision: 1, file_name: 'f.xlsx', checksum: 'ck', published_by: 'p', published_at: 't', action: 'publish', via: 'v1', set_current: true, data: REAL, sha256: 'b'.repeat(64), sig: 'c'.repeat(64) }] };
-  const o = JSON.parse(JSON.stringify(N.buildServerBackup(resp)));
-  assert.equal(o.version, 1, 'formato continua na versão 1');
-  eq([o.auth.alg, o.versions[0].sha256, o.versions[0].sig, o.versions[0].via], ['HMAC-SHA256', 'b'.repeat(64), 'c'.repeat(64), 'v1']);
-  assert.equal(N.checkServerBackup(o).V.length, 1);
-  // backup antigo (sem auth/sha256/sig/via) continua válido
-  const antigo = JSON.parse(JSON.stringify(o)); delete antigo.auth; antigo.versions.forEach((v) => { delete v.sha256; delete v.sig; delete v.via; });
-  eq(N.checkServerBackup(antigo).P, []);
-  // sem assinatura do servidor, o backup é gerado com auth = null
-  assert.equal(N.buildServerBackup({ ...resp, auth: undefined }).auth, null);
+test('backup legado (formato 1): continua lido, mas nunca é tratado como autêntico', () => {
+  const resp = { exportedAt: '2026-11-06T20:00:00Z', exportedBy: 'p@x', months: [{ period_key: '2026-10', revision: 1, checksum: 'ck', file_name: 'f.xlsx' }], publications: [],
+    versions: [{ period_key: '2026-10', revision: 1, file_name: 'f.xlsx', checksum: 'ck', published_by: 'p', published_at: 't', action: 'publish', set_current: true, data: REAL }] };
+  const o = plain(N.buildServerBackup(resp));
+  assert.equal(o.version, 1); assert.ok(!('auth' in o));
+  const ck = N.checkServerBackup(o); eq(ck.P, []);
+  const loc = { contentSha256: 'x'.repeat(64), shaOk: true };
+  assert.equal(N.classifyBackup(o, ck, loc, null), 'legado');
+  assert.equal(N.classifyBackup(o, ck, loc, { configured: true, signed: false, valid: false }), 'legado', 'nem a resposta do servidor torna um legado autêntico');
+  // backup do esquema antigo (assinatura por versão, ftr-painel-backup-v1): não é mais conferido
+  assert.equal(N.classifyBackup({ ...o, auth: { alg: 'HMAC-SHA256', scheme: 'ftr-painel-backup-v1' } }, ck, loc, null), 'esquema_antigo');
+  // backups antigos sem os campos novos (via, sha256) continuam válidos na estrutura
+  const antigo = plain(o); antigo.versions.forEach((v) => { delete v.via; }); eq(N.checkServerBackup(antigo).P, []);
+  eq(['autentico', 'legado', 'esquema_antigo', 'pendente', 'invalida', 'assinatura_ausente', 'chave_desconhecida', 'integridade'].map(N.sbkCanRepublish),
+    ['sim', 'confirmar', 'confirmar', 'nao', 'nao', 'nao', 'nao', 'nao']);
 });
+
+test('JSON canônico (RFC 8785): vetores da norma, ordem das propriedades e entradas inválidas', () => {
+  // vetor de exemplo da RFC 8785 (seção 3.2.2): números, textos com escapes e literais
+  const entrada = JSON.parse('{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"\\u20ac$\\u000F\\u000aA\'\\u0042\\u0022\\u005c\\\\\\"\\/","literals":[null,true,false]}');
+  assert.equal(N.jcs(entrada), '{"literals":[null,true,false],"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],"string":"€$\\u000f\\nA\'B\\"\\\\\\\\\\"/"}');
+  // ordenação de propriedades por unidades UTF-16 (RFC 8785, seção 3.2.3)
+  const chaves = JSON.parse('{"\\u20ac":"Euro Sign","\\r":"Carriage Return","\\ufb33":"Hebrew Letter Dalet With Dagesh","1":"One","\\ud83d\\ude00":"Emoji: Grinning Face","\\u0080":"Control","\\u00f6":"Latin Small Letter O With Diaeresis"}');
+  assert.deepEqual(JSON.parse('[' + N.jcs(chaves).slice(1, -1).split(/,(?=")/).map((kv) => JSON.stringify(JSON.parse('{' + kv + '}')[Object.keys(JSON.parse('{' + kv + '}'))[0]])).join(',') + ']'),
+    ['Carriage Return', 'One', 'Control', 'Latin Small Letter O With Diaeresis', 'Euro Sign', 'Emoji: Grinning Face', 'Hebrew Letter Dalet With Dagesh']);
+  // mesma informação com propriedades em outra ordem = mesmo texto; arrays mantêm a ordem
+  assert.equal(N.jcs({ b: 1, a: { d: [3, 1, 2], c: 'ção' } }), N.jcs({ a: { c: 'ção', d: [3, 1, 2] }, b: 1 }));
+  assert.notEqual(N.jcs({ a: [1, 2] }), N.jcs({ a: [2, 1] }));
+  assert.equal(N.jcs({ t: 'Fermentação ✓ 😀', z: -0, n: 1.5e-7 }), '{"n":1.5e-7,"t":"Fermentação ✓ 😀","z":0}');
+  for (const ruim of [NaN, Infinity, undefined, () => 1, new Date(0), { a: '\ud800' }, { [String.fromCharCode(0xdc00)]: 1 }])
+    assert.throws(() => N.jcs(ruim), /JCS/, 'recusa ' + String(ruim));
+});
+
+test('classificação de autenticidade: estados distintos e "autêntico" só com HMAC válido', () => {
+  const o = { version: 2, auth: { alg: N.SBK_ALG, scheme: N.SBK_SCHEME, keyId: 'k1', contentSha256: 'a'.repeat(64), sig: 'b'.repeat(64) } };
+  const ok = { P: [], W: [], V: [] }, loc = { contentSha256: 'a'.repeat(64), shaOk: true };
+  const C = (ob, ck, l, s) => N.classifyBackup(ob, ck, l, s);
+  assert.equal(C(o, { P: ['x'], W: [], V: [] }, loc, null), 'integridade');
+  assert.equal(C(o, ok, { ...loc, shaOk: false }, null), 'integridade');
+  assert.equal(C(o, ok, { ...loc, contentSha256: 'c'.repeat(64) }, null), 'integridade', 'resumo do conteúdo diferente do registrado');
+  assert.equal(C({ version: 2 }, ok, loc, null), 'assinatura_ausente', 'formato 2 sem assinatura = assinatura removida');
+  assert.equal(C({ ...o, auth: { ...o.auth, alg: 'HMAC-SHA1' } }, ok, loc, null), 'esquema_invalido');
+  assert.equal(C({ ...o, auth: { ...o.auth, scheme: 'ftr-painel-backup-v1' } }, ok, loc, null), 'esquema_invalido');
+  assert.equal(C(o, ok, null, null), 'sem_calculo');
+  assert.equal(C(o, ok, loc, null), 'pendente', 'assinado, mas ainda não conferido: não é "autêntico"');
+  assert.equal(C(o, ok, loc, { configured: false, signed: true, schemeOk: true, keyKnown: false }), 'nao_configurado');
+  assert.equal(C(o, ok, loc, { configured: true, signed: true, schemeOk: true, keyKnown: false }), 'chave_desconhecida');
+  assert.equal(C(o, ok, loc, { configured: true, signed: true, schemeOk: false, valid: false }), 'esquema_invalido');
+  assert.equal(C(o, ok, loc, { configured: true, signed: true, schemeOk: true, keyKnown: true, valid: false }), 'invalida');
+  assert.equal(C(o, ok, loc, { configured: true, signed: true, schemeOk: true, keyKnown: true, valid: true }), 'autentico');
+  assert.ok(N.SBK_ST.autentico[1].startsWith('Autêntico') && !Object.entries(N.SBK_ST).some(([k, v]) => k !== 'autentico' && /Autêntico/.test(v[1])), 'só o estado autêntico usa a palavra');
+});
+

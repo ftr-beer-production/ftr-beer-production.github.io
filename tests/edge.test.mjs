@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'edge-'));
 copyFileSync(join(RAIZ, 'supabase/functions/painel-publish/index.ts'), join(tmp, 'edge.ts'));
-const { handle } = await import(join(tmp, 'edge.ts'));
+const { handle, canonical } = await import(join(tmp, 'edge.ts'));
+import { ambiente } from './lib/painel.mjs';
 
 // Dados reais embutidos no painel (outubro/2026), usados como carga de publicação
 function dadosEmbutidos() {
@@ -209,58 +210,160 @@ test('versão e backup: dados completos só para publicadores', async () => {
     'GET /rest/v1/painel_current': () => J(200, [{ period_key: '2026-10' }]),
   });
   const b = await call({ action: 'backup' });
-  assert.equal(b.status, 200); assert.equal(b.j.versions.length, 1); assert.equal(b.j.exportedBy, 'pub@heiway.net');
+  assert.equal(b.status, 200); assert.equal(b.j.backup.versions.length, 1); assert.equal(b.j.backup.exportedBy, 'pub@heiway.net'); assert.equal(b.j.backup.versions[0].dataJson, JSON.stringify(D));
 });
 
-const SEGREDO = 'segredo-de-teste-com-mais-de-32-caracteres!!';
+// ------------------------------------------------------------------ backups: assinatura do conteúdo integral
+const PN = ambiente(readFileSync(join(RAIZ, 'docs/index.html'), 'utf8')); // funções puras do painel (lado do navegador)
+const SEGREDO = 'segredo-de-teste-com-mais-de-32-caracteres!!', SEGREDO2 = 'outro-segredo-de-teste-com-mais-de-32-caracteres';
+const ESIG = { ...ENV, PAINEL_BACKUP_HMAC_KEY: SEGREDO, PAINEL_BACKUP_HMAC_KEY_ID: 'k2026' };
+const D2 = { ...D, ftrGeral: 0.5 }, ck1 = fnv(JSON.stringify(D)), ck2 = fnv(JSON.stringify(D2));
+// histórico realista: r1 (carga inicial), r2 (publicação moderna), r3 (recuperação da r1, vigente e corrente)
 const rotasBackup = () => ({
   'GET /rest/v1/painel_month_versions': () => J(200, [
-    { period_key: '2026-10', revision: 3, checksum: DCK, data: D },
-    { period_key: '2026-10', revision: 4, checksum: 'outro', data: { ...D, ftrGeral: 0.5 } }]),
-  'GET /rest/v1/painel_months': () => J(200, [{ period_key: '2026-10', revision: 4 }]),
-  'GET /rest/v1/painel_publications': () => J(200, [{ id: 1 }]),
-  'GET /rest/v1/painel_current': () => J(200, [{ period_key: '2026-10' }]),
+    { id: 1, publication_id: 1, period_key: '2026-10', revision: 1, file_name: 'out.xlsx', checksum: ck1, published_by: 'a@x', published_at: '2026-10-05T10:00:00+00:00', action: 'backfill', restored_from_revision: null, set_current: true, via: 'v1', created_at: '2026-11-09T12:00:00+00:00', data: D, summary: { k: 1 } },
+    { id: 2, publication_id: 2, period_key: '2026-10', revision: 2, file_name: 'out-v2.xlsx', checksum: ck2, published_by: 'b@x', published_at: '2026-11-07T10:00:00+00:00', action: 'publish', restored_from_revision: null, set_current: true, via: 'v2', created_at: '2026-11-07T10:00:00+00:00', data: D2, summary: { k: 2 } },
+    { id: 3, publication_id: 3, period_key: '2026-10', revision: 3, file_name: 'out.xlsx', checksum: ck1, published_by: 'c@x', published_at: '2026-11-08T10:00:00+00:00', action: 'restore', restored_from_revision: 1, set_current: true, via: 'v2', created_at: '2026-11-08T10:00:00+00:00', data: D, summary: { k: 1 } }]),
+  'GET /rest/v1/painel_months': () => J(200, [{ period_key: '2026-10', revision: 3, checksum: ck1, file_name: 'out.xlsx', published_at: '2026-11-08T10:00:00+00:00' }]),
+  'GET /rest/v1/painel_publications': () => J(200, [
+    { id: 1, period_key: '2026-10', revision: 1, file_name: 'out.xlsx', checksum: ck1, published_by: 'a@x', published_at: '2026-10-05T10:00:00+00:00', set_current: true, replaced: false, action: 'publish', restored_from_revision: null, via: 'v1' },
+    { id: 2, period_key: '2026-10', revision: 2, file_name: 'out-v2.xlsx', checksum: ck2, published_by: 'b@x', published_at: '2026-11-07T10:00:00+00:00', set_current: true, replaced: true, action: 'publish', restored_from_revision: null, via: 'v2' },
+    { id: 3, period_key: '2026-10', revision: 3, file_name: 'out.xlsx', checksum: ck1, published_by: 'c@x', published_at: '2026-11-08T10:00:00+00:00', set_current: true, replaced: true, action: 'restore', restored_from_revision: 1, via: 'v2' }]),
+  'GET /rest/v1/painel_current': () => J(200, [{ period_key: '2026-10', file_name: 'out.xlsx', checksum: ck1, published_at: '2026-11-08T10:00:00+00:00' }]),
 });
 const sha = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((x) => x.toString(16).padStart(2, '0')).join('');
-const callEnv = async (body, e) => { const r = await handle(req(body), env(e)); const txt = await r.text(); assert.ok(!txt.includes('sb_secret') && !txt.includes(SEGREDO), 'nenhum segredo na resposta'); return { status: r.status, j: JSON.parse(txt) }; };
+const callEnv = async (body, e) => { const r = await handle(req(body), env(e)); const txt = await r.text(); assert.ok(!txt.includes('sb_secret') && !txt.includes(SEGREDO) && !txt.includes(SEGREDO2), 'nenhum segredo na resposta'); return { status: r.status, j: JSON.parse(txt) }; };
+const backupAssinado = async (e = ESIG) => { reset(rotasBackup()); const r = await callEnv({ action: 'backup' }, e); assert.equal(r.status, 200); return r.j.backup; };
+// o que o NAVEGADOR faz: sha256 de cada versão + sha256 do JSON canônico do arquivo sem "auth" (função do painel)
+const local = async (b) => { let shaOk = true; for (const v of b.versions) if (v.sha256 != null && await sha(v.dataJson) !== v.sha256) shaOk = false; return { contentSha256: await sha(PN.jcs(PN.backupBody(b))), shaOk }; };
+const verificar = async (b, e = ESIG, hash) => (await callEnv({ action: 'verify_backup', auth: b.auth, contentSha256: hash || (await local(b)).contentSha256 }, e)).j;
+// estado completo, como a tela do painel calcula
+const estado = async (b, e = ESIG) => { const ck = PN.checkServerBackup(plainJ(b)), loc = await local(b), st0 = PN.classifyBackup(plainJ(b), ck, loc, null);
+  if (st0 !== 'pendente') return { st: st0, ck }; const srv = await verificar(b, e); return { st: PN.classifyBackup(plainJ(b), ck, loc, srv), ck, srv }; };
+const plainJ = (x) => JSON.parse(JSON.stringify(x));
+// adulterador que conhece o formato: altera, recalcula FNV-1a, sha256 de cada versão e o contentSha256, e MANTÉM a assinatura
+const adulterar = async (b, f) => { const x = plainJ(b); f(x); for (const v of x.versions) { v.integrity = fnv(v.dataJson); v.sha256 = await sha(v.dataJson); }
+  if (x.auth) x.auth.contentSha256 = await sha(canonical(PN.backupBody(x))); return x; };
 
-test('backup sem segredo configurado: sha256 por versão e SEM assinatura (autenticidade não comprovada)', async () => {
-  reset(rotasBackup());
-  const { status, j } = await callEnv({ action: 'backup' }, ENV);
-  assert.equal(status, 200); assert.equal(j.auth, null);
-  assert.equal(j.versions[0].sha256, await sha(JSON.stringify(D))); assert.ok(!('sig' in j.versions[0]));
-  const curto = await callEnv({ action: 'backup' }, { ...ENV, PAINEL_BACKUP_HMAC_KEY: 'curto' });
-  assert.equal(curto.j.auth, null, 'segredo curto demais é ignorado');
-  const v = await callEnv({ action: 'verify_backup', versions: [{ key: '2026-10', revision: 3, checksum: DCK, sha256: j.versions[0].sha256 }] }, ENV);
-  assert.equal(v.status, 200); assert.equal(v.j.configured, false);
+test('JSON canônico: Edge Function e painel produzem exatamente o mesmo texto', async () => {
+  const b = await backupAssinado();
+  const casos = [b, PN.backupBody(b), D, { z: 'ação ✓ 😀 €', a: [3, 1, 2], m: { y: 1e30, x: 1.5e-7, w: -0, v: null, u: true } },
+    JSON.parse('{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"\\u20ac$\\u000F\\u000aA\'\\u0042\\u0022\\u005c\\\\\\"\\/","literals":[null,true,false]}')];
+  for (const c of casos) assert.equal(canonical(c), PN.jcs(c));
+  for (const ruim of [NaN, Infinity, undefined, { a: '\ud800' }]) { assert.throws(() => canonical(ruim), /JCS/); assert.throws(() => PN.jcs(ruim), /JCS/); }
 });
 
-test('backup assinado (HMAC-SHA256): conferência no servidor detecta adulteração e versões removidas', async () => {
-  const E = { ...ENV, PAINEL_BACKUP_HMAC_KEY: SEGREDO, PAINEL_BACKUP_HMAC_KEY_ID: 'k2026' };
+test('backup sem segredo: formato 1, sem assinatura, identificado como não autenticado', async () => {
   reset(rotasBackup());
-  const b = (await callEnv({ action: 'backup' }, E)).j;
-  assert.deepEqual([b.auth.alg, b.auth.keyId, b.auth.scheme], ['HMAC-SHA256', 'k2026', 'ftr-painel-backup-v1']);
-  assert.ok(b.versions.every((v) => /^[0-9a-f]{64}$/.test(v.sig) && /^[0-9a-f]{64}$/.test(v.sha256)));
-  const ids = (vs) => vs.map((v) => ({ key: v.period_key, revision: v.revision, checksum: v.checksum, sha256: v.sha256, sig: v.sig }));
-  const ver = (vs, extra = {}) => callEnv({ action: 'verify_backup', auth: b.auth, exportedAt: b.exportedAt, exportedBy: b.exportedBy, versions: vs, ...extra }, E);
-  let r = await ver(ids(b.versions));
-  assert.equal(r.j.manifestValid, true); assert.ok(r.j.versions.every((x) => x.valid), 'backup original autêntico');
-  // dados alterados e sha256 recalculado pelo adulterador: a assinatura não confere
-  const adult = ids(b.versions); adult[1].sha256 = await sha(JSON.stringify({ ...D, ftrGeral: 0.99 }));
-  r = await ver(adult);
-  assert.deepEqual(r.j.versions.map((x) => x.valid), [true, false]); assert.equal(r.j.manifestValid, false);
-  // versão removida do arquivo: cada assinatura restante confere, mas a lista (manifesto) não
-  r = await ver(ids(b.versions).slice(0, 1));
-  assert.equal(r.j.versions[0].valid, true); assert.equal(r.j.manifestValid, false);
-  // exportedBy trocado no arquivo
-  r = await ver(ids(b.versions), { exportedBy: 'outra@pessoa' }); assert.equal(r.j.manifestValid, false);
-  // assinatura de outra chave
-  r = await ver(ids(b.versions), { auth: { ...b.auth, keyId: 'k-velha' } }); assert.equal(r.j.keyKnown, false);
-  // arquivo sem assinatura
-  r = await ver(ids(b.versions), { auth: null }); assert.equal(r.j.signed, false);
-  // identificação inválida é recusada; nada é gravado em nenhum caso
-  assert.equal((await ver([{ key: '2026-10', revision: 3, checksum: DCK, sha256: 'xyz' }])).status, 422);
-  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc') || (c.method !== 'GET' && c.path.startsWith('/rest/v1/'))));
+  const { status, j } = await callEnv({ action: 'backup' }, ENV);
+  assert.equal(status, 200); assert.equal(j.backup.version, 1); assert.ok(!('auth' in j.backup));
+  const { st, ck } = await estado(j.backup, ENV);
+  eq0(ck.P); assert.equal(st, 'legado');
+  assert.equal((await callEnv({ action: 'backup' }, { ...ENV, PAINEL_BACKUP_HMAC_KEY: 'curto' })).j.backup.version, 1, 'segredo curto demais é ignorado');
+  assert.equal((await verificar({ auth: { alg: 'HMAC-SHA256', scheme: 'ftr-painel-backup-v2', keyId: 'k1', sig: 'a'.repeat(64) }, versions: [] }, ENV, 'b'.repeat(64))).configured, false);
+});
+const eq0 = (a) => assert.deepEqual(plainJ(a), []);
+
+test('backup assinado (formato 2): o servidor monta o arquivo inteiro e assina o conteúdo integral', async () => {
+  const b = await backupAssinado();
+  assert.equal(b.version, 2); assert.deepEqual(Object.keys(b.auth).sort(), ['alg', 'contentSha256', 'keyId', 'scheme', 'sig']);
+  assert.deepEqual([b.auth.alg, b.auth.scheme, b.auth.keyId], ['HMAC-SHA256', 'ftr-painel-backup-v2', 'k2026']);
+  assert.equal(b.auth.contentSha256, await sha(canonical(PN.backupBody(b))), 'resumo = SHA-256 do JSON canônico do arquivo sem "auth"');
+  // todos os campos do arquivo estão no conteúdo assinado (só "auth" fica de fora)
+  assert.deepEqual(Object.keys(PN.backupBody(b)).sort(), ['current', 'dataFormat', 'exportedAt', 'exportedBy', 'format', 'months', 'publications', 'version', 'versions']);
+  assert.deepEqual(Object.keys(b.versions[0]).sort(), ['action', 'checksum', 'createdAt', 'dataJson', 'file', 'id', 'integrity', 'key', 'publicationId', 'publishedAt', 'publishedBy', 'restoredFromRevision', 'revision', 'setCurrent', 'sha256', 'summaryJson', 'via']);
+  assert.deepEqual(Object.keys(b.publications[0]).sort(), ['action', 'checksum', 'file', 'id', 'key', 'publishedAt', 'publishedBy', 'replaced', 'restoredFromRevision', 'revision', 'setCurrent', 'via']);
+  const { st, ck, srv } = await estado(b);
+  eq0(ck.P); assert.equal(srv.valid, true); assert.equal(srv.keyCurrent, true); assert.equal(st, 'autentico');
+  assert.equal(PN.sbkCanRepublish(st), 'sim');
+});
+
+// cada cenário: altera, recalcula FNV-1a e SHA-256 (como faria um adulterador), mantém a assinatura original
+const CENARIOS = [
+  ['1. nome do arquivo de origem', (x) => { x.versions[2].file = 'falso.xlsx'; x.publications[2].file = 'falso.xlsx'; x.months[0].file = 'falso.xlsx'; x.current.file = 'falso.xlsx'; }],
+  ['2. nome do publicador', (x) => { x.versions[1].publishedBy = 'outra@x'; x.publications[1].publishedBy = 'outra@x'; }],
+  ['3. data e horário da publicação', (x) => { x.versions[1].publishedAt = '2026-11-01T10:00:00+00:00'; x.publications[1].publishedAt = '2026-11-01T10:00:00+00:00'; }],
+  ['4. data e horário da exportação', (x) => { x.exportedAt = '2027-01-01T00:00:00.000Z'; }],
+  ['5. tipo de operação', (x) => { x.versions[2].action = 'publish'; x.versions[2].restoredFromRevision = null; x.publications[2].action = 'publish'; x.publications[2].restoredFromRevision = null; }],
+  ['6. revisão de origem', (x) => { x.versions[2].restoredFromRevision = 2; x.publications[2].restoredFromRevision = 2; }],
+  ['7. caminho v1/v2', (x) => { x.versions[1].via = 'v1'; x.publications[1].via = 'v1'; }],
+  ['8. indicação de versão corrente', (x) => { x.versions[1].setCurrent = false; x.publications[1].setCurrent = false; }],
+  ['9. checksum', (x) => { x.versions[1].checksum = 'abc123'; x.publications[1].checksum = 'abc123'; }],
+  ['10. dados interpretados (indicador alterado)', (x) => { x.versions[1].dataJson = JSON.stringify({ ...JSON.parse(x.versions[1].dataJson), ftrGeral: 0.99 }); }],
+  ['11. lista de meses', (x) => { x.months.push({ key: '2026-09', revision: 1, checksum: ck1, file: 'out.xlsx', publishedAt: '2026-10-01T00:00:00+00:00' }); }],
+  ['12. lista de publicações', (x) => { x.publications[1].replaced = false; }],
+  ['12b. publicação removida', (x) => { x.publications.splice(1, 1); x.versions[1].publicationId = null; }],
+  ['13. revisões renumeradas', (x) => { x.versions[1].revision = 9; x.publications[1].revision = 9; }],
+  ['14. mês corrente', (x) => { x.current.key = '2026-09'; x.months.push({ key: '2026-09', revision: 3, checksum: ck1, file: 'out.xlsx', publishedAt: x.months[0].publishedAt }); }],
+  ['15. metadados gerais (quem exportou)', (x) => { x.exportedBy = 'invasor@x'; }],
+  ['15b. metadados gerais (formato interno declarado)', (x) => { x.format = 'ftr-painel-server-backup'; x.dataFormat = 2; x.extra = 'campo novo'; }],
+  ['resumo de uma versão (summaryJson)', (x) => { x.versions[0].summaryJson = '{"k":99}'; }],
+  ['identificadores internos (id e createdAt)', (x) => { x.versions[0].id = 77; x.versions[0].createdAt = '2020-01-01T00:00:00+00:00'; }],
+  ['versão removida', (x) => { x.versions.splice(1, 1); }],
+  ['versão duplicada', (x) => { x.versions.push(plainJ(x.versions[0])); }],
+  ['ordem das versões trocada', (x) => { x.versions.reverse(); }],
+  ['metadados alterados sem mudar indicadores (troca de publicador e data na r1)', (x) => { x.versions[0].publishedBy = 'z@x'; x.publications[0].publishedBy = 'z@x'; x.versions[0].publishedAt = x.publications[0].publishedAt = '2026-10-06T10:00:00+00:00'; }],
+];
+
+test('adulteração de QUALQUER informação protegida invalida a assinatura (com FNV-1a e SHA-256 recalculados)', async () => {
+  const b = await backupAssinado();
+  for (const [nome, f] of CENARIOS) {
+    const x = await adulterar(b, f);
+    assert.notEqual(canonical(PN.backupBody(x)), canonical(PN.backupBody(b)), nome + ': o cenário alterou o conteúdo');
+    const loc = await local(x);
+    assert.ok(loc.shaOk && loc.contentSha256 === x.auth.contentSha256, nome + ': os resumos recalculados conferem (o adulterador "acertou" os hashes)');
+    const srv = await verificar(x);
+    assert.equal(srv.valid, false, nome + ': o servidor recusa a assinatura');
+    const st = PN.classifyBackup(plainJ(x), PN.checkServerBackup(plainJ(x)), loc, srv);
+    assert.ok(['invalida', 'integridade'].includes(st) && PN.sbkCanRepublish(st) === 'nao', nome + ': estado ' + st + ', republicação bloqueada');
+  }
+});
+
+test('ordem das propriedades JSON alterada sem mudar o conteúdo: continua autêntico', async () => {
+  const b = await backupAssinado();
+  const inv = (v) => Array.isArray(v) ? v.map(inv) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).reverse().map((k) => [k, inv(v[k])])) : v;
+  const r = inv(b); assert.notEqual(JSON.stringify(r), JSON.stringify(b));
+  assert.equal((await estado(r)).st, 'autentico');
+});
+
+test('envelope da assinatura: remoção, chave, algoritmo, esquema, resumo e assinatura forjada', async () => {
+  const b = await backupAssinado();
+  const sem = plainJ(b); delete sem.auth;
+  assert.equal((await estado(sem)).st, 'assinatura_ausente', 'formato 2 sem assinatura não passa despercebido');
+  const chave = plainJ(b); chave.auth.keyId = 'outra';
+  let r = await estado(chave); assert.equal(r.st, 'chave_desconhecida'); assert.equal(r.srv.valid, false);
+  const alg = plainJ(b); alg.auth.alg = 'HMAC-SHA1';
+  assert.equal((await estado(alg)).st, 'esquema_invalido');
+  assert.equal((await verificar(alg)).schemeOk, false, 'o servidor também recusa o algoritmo trocado');
+  const esq = plainJ(b); esq.auth.scheme = 'ftr-painel-backup-v1';
+  assert.equal((await estado(esq)).st, 'esquema_invalido'); assert.equal((await verificar(esq)).valid, false);
+  // resumo do envelope alterado sem mexer no conteúdo: o navegador acusa integridade; o servidor recusa esse resumo
+  const man = plainJ(b); man.auth.contentSha256 = 'f'.repeat(64);
+  assert.equal((await estado(man)).st, 'integridade'); assert.equal((await verificar(man, ESIG, man.auth.contentSha256)).valid, false);
+  // o servidor não confia no resumo enviado: um SHA-256 arbitrário com a assinatura original é recusado
+  assert.equal((await verificar(b, ESIG, '0'.repeat(64))).valid, false);
+  // assinatura forjada (HMAC com outro segredo sobre o conteúdo adulterado) é recusada
+  const forj = await adulterar(b, (x) => { x.exportedBy = 'invasor@x'; });
+  const { createHmac } = await import('node:crypto');
+  forj.auth.sig = createHmac('sha256', 'segredo-chutado-pelo-invasor-1234567890').update(['ftr-painel-backup-v2', 'HMAC-SHA256', 'k2026', forj.auth.contentSha256].join('\n')).digest('hex');
+  assert.equal((await verificar(forj)).valid, false);
+  // rebaixar para o formato 1 (removendo a assinatura) nunca resulta em "autêntico": vira legado não autenticado
+  const leg = plainJ(b); delete leg.auth; leg.version = 1;
+  const rl = await estado(leg); assert.equal(rl.st, 'legado'); assert.equal(PN.sbkCanRepublish(rl.st), 'confirmar');
+  assert.equal((await callEnv({ action: 'verify_backup', auth: b.auth, contentSha256: 'xyz' }, ESIG)).status, 422, 'resumo mal formado recusado');
+  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc') || (c.method !== 'GET' && c.path.startsWith('/rest/v1/'))), 'nada é gravado');
+});
+
+test('rotação de chave: backups assinados com a chave anterior só conferem se ela for mantida para verificação', async () => {
+  const b = await backupAssinado(); // chave k2026
+  const nova = { ...ENV, PAINEL_BACKUP_HMAC_KEY: SEGREDO2, PAINEL_BACKUP_HMAC_KEY_ID: 'k2027' };
+  assert.equal((await estado(b, nova)).st, 'chave_desconhecida', 'sem a chave anterior: autenticidade não comprovada');
+  const comAnterior = { ...nova, PAINEL_BACKUP_HMAC_PREVIOUS_KEYS: JSON.stringify({ k2026: SEGREDO }) };
+  const r = await estado(b, comAnterior); assert.equal(r.st, 'autentico'); assert.equal(r.srv.keyCurrent, false);
+  const novo = await backupAssinado(comAnterior); assert.equal(novo.auth.keyId, 'k2027', 'a chave anterior nunca assina');
+  // trocar o keyId de um backup para outra chave conhecida também invalida (o keyId está na mensagem assinada)
+  const troca = plainJ(b); troca.auth.keyId = 'k2027'; assert.equal((await estado(troca, comAnterior)).st, 'invalida');
+  assert.equal((await estado(b, { ...nova, PAINEL_BACKUP_HMAC_PREVIOUS_KEYS: '{inválido' })).st, 'chave_desconhecida');
 });
 
 test('ação desconhecida e corpo inválido', async () => {

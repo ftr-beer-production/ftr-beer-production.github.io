@@ -20,9 +20,9 @@
 //              revisão esperada sempre obrigatória
 //   versions — lista o histórico de versões (metadados; sem os dados)
 //   version  — dados completos de uma versão, para prévia
-//   backup   — todas as versões completas + metadados, para backup (com assinatura HMAC
-//              opcional: ver PAINEL_BACKUP_HMAC_KEY)
-//   verify_backup — confere a assinatura HMAC de um backup (só o servidor tem o segredo)
+//   backup   — o ARQUIVO de backup completo, montado aqui (formato 2 assinado por HMAC-SHA256 sobre o
+//              conteúdo integral, quando PAINEL_BACKUP_HMAC_KEY existe; senão formato 1, sem assinatura)
+//   verify_backup — confere a assinatura do conteúdo integral de um backup (só o servidor tem o segredo)
 // A gravação usa a chave secreta do próprio projeto (variável padrão das Edge Functions),
 // que nunca sai do Supabase. Implantar com verify_jwt = false: o login é conferido no código.
 // Validação dos dados idêntica à antiga função do Netlify (netlify/functions/painel-publish.mjs).
@@ -155,10 +155,19 @@ function validatePayload(d, key) {
 
 
 // ---- autenticidade dos backups (HMAC-SHA256 com segredo que só existe no servidor) ----
-// Ativada só quando PAINEL_BACKUP_HMAC_KEY (>= 32 caracteres) está configurada nos segredos da
-// Edge Function. Sem ela, o backup sai sem assinatura (comportamento anterior). O navegador
-// nunca recebe o segredo: só as assinaturas, que ele não consegue recalcular.
-const SIG_V = 'ftr-painel-backup-v1';
+// Esquema ftr-painel-backup-v2: a assinatura cobre o CONTEÚDO INTEGRAL do backup (tudo, exceto o próprio
+// envelope "auth"), em representação canônica RFC 8785 (JCS):
+//   contentSha256 = SHA-256( JCS(backup sem "auth") )
+//   sig           = HMAC-SHA256( segredo, "ftr-painel-backup-v2\nHMAC-SHA256\n<keyId>\n<contentSha256>" )
+// Esquema, algoritmo e identificador da chave entram na mensagem assinada: trocar qualquer um invalida.
+// Ativada só com PAINEL_BACKUP_HMAC_KEY (>= 32 caracteres). Sem ela, o backup sai no formato 1, SEM
+// assinatura (identificado como não autenticado). O navegador nunca recebe o segredo.
+// PAINEL_BACKUP_HMAC_PREVIOUS_KEYS (opcional, JSON {"<keyId>":"<segredo>"}): chaves antigas usadas
+// SOMENTE para conferir backups assinados antes de uma rotação; nunca para assinar.
+const SCHEME = 'ftr-painel-backup-v2';
+const ALG = 'HMAC-SHA256';
+const SBK_FMT = 'ftr-painel-server-backup';
+const DATA_FMT = 2; // mesmo FMT do painel (formato interno dos dados)
 const enc = new TextEncoder();
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
 async function sha256hex(s: string): Promise<string> { return hex(await crypto.subtle.digest('SHA-256', enc.encode(s))); }
@@ -171,15 +180,72 @@ function sameHex(a: unknown, b: string): boolean { // comparação em tempo cons
   let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return d === 0;
 }
-// deno-lint-ignore no-explicit-any
-const versionMsg = (v: any) => [SIG_V, 'version', v.key, v.revision, v.checksum, v.sha256].join('|');
-// deno-lint-ignore no-explicit-any
-const manifestMsg = (exportedAt: string, exportedBy: string, vs: any[]) =>
-  [SIG_V, 'manifest', exportedAt, exportedBy, vs.map((v) => v.key + ':' + v.revision + ':' + v.sha256).join(',')].join('|');
+// JSON canônico (RFC 8785 / JCS). MESMA implementação do painel (docs/index.html, função jcs) —
+// o teste tests/painel.test.mjs confere que as duas produzem o mesmo texto.
+// Propriedades ordenadas por unidades UTF-16; arrays na ordem original; números no formato do
+// ECMAScript (o mesmo de JSON.stringify); textos com o escape do JSON.stringify. Recusa números não
+// finitos, undefined, funções, BigInt, objetos não simples e textos com surrogates isolados.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+export function canonical(v: unknown): string {
+  if (v === null) return 'null';
+  switch (typeof v) {
+    case 'boolean': return v ? 'true' : 'false';
+    case 'number': if (!Number.isFinite(v)) throw new Error('JCS: número não finito'); return JSON.stringify(v);
+    case 'string': if (LONE_SURROGATE.test(v)) throw new Error('JCS: texto com caractere Unicode inválido'); return JSON.stringify(v);
+    case 'object': {
+      if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+      if (Object.prototype.toString.call(v) !== '[object Object]') throw new Error('JCS: objeto não suportado');
+      const o = v as Record<string, unknown>;
+      return '{' + Object.keys(o).sort().map((k) => canonical(k) + ':' + canonical(o[k])).join(',') + '}';
+    }
+    default: throw new Error('JCS: tipo não suportado (' + typeof v + ')');
+  }
+}
+const signedMsg = (scheme: string, alg: string, keyId: string, contentSha256: string) => [scheme, alg, keyId, contentSha256].join('\n');
 function backupSecret(env: Env): { secret: string; keyId: string } | null {
   const secret = (env('PAINEL_BACKUP_HMAC_KEY') || '').trim();
   if (secret.length < 32) return null;
   return { secret, keyId: (env('PAINEL_BACKUP_HMAC_KEY_ID') || 'k1').trim().slice(0, 32) };
+}
+// chave (atual ou antiga) que corresponde a um keyId, só para conferência
+function verifySecret(env: Env, keyId: string): { secret: string; current: boolean } | null {
+  const cur = backupSecret(env);
+  if (cur && cur.keyId === keyId) return { secret: cur.secret, current: true };
+  try {
+    const prev = JSON.parse(env('PAINEL_BACKUP_HMAC_PREVIOUS_KEYS') || '{}');
+    const s = prev && typeof prev === 'object' && !Array.isArray(prev) ? prev[keyId] : null;
+    if (typeof s === 'string' && s.trim().length >= 32) return { secret: s.trim(), current: false };
+  } catch (_e) { /* JSON inválido = sem chaves antigas */ }
+  return null;
+}
+const nn = (x: unknown) => (x === undefined ? null : x);
+// Conteúdo INTEGRAL do backup (o que é assinado). Todos os campos que o arquivo leva estão aqui.
+// deno-lint-ignore no-explicit-any
+export async function backupContent(r: any, version: 1 | 2) {
+  // deno-lint-ignore no-explicit-any
+  const versions = await Promise.all((r.versions || []).map(async (v: any) => {
+    const dataJson = JSON.stringify(v.data);
+    return {
+      id: nn(v.id), publicationId: nn(v.publication_id), key: v.period_key, revision: v.revision, file: v.file_name,
+      checksum: v.checksum, publishedBy: v.published_by, publishedAt: v.published_at, createdAt: nn(v.created_at),
+      action: v.action, restoredFromRevision: nn(v.restored_from_revision), setCurrent: nn(v.set_current), via: nn(v.via),
+      integrity: fnv(dataJson), sha256: await sha256hex(dataJson), dataJson, summaryJson: JSON.stringify(nn(v.summary)),
+    };
+  }));
+  const c = r.current;
+  return {
+    format: SBK_FMT, version, dataFormat: DATA_FMT, exportedAt: r.exportedAt, exportedBy: r.exportedBy,
+    current: c ? { key: c.period_key, file: nn(c.file_name), checksum: nn(c.checksum), publishedAt: nn(c.published_at) } : null,
+    // deno-lint-ignore no-explicit-any
+    months: (r.months || []).map((m: any) => ({ key: m.period_key, revision: m.revision, checksum: m.checksum, file: m.file_name, publishedAt: m.published_at })),
+    // deno-lint-ignore no-explicit-any
+    publications: (r.publications || []).map((p: any) => ({
+      id: p.id, key: p.period_key, revision: p.revision, file: p.file_name, checksum: p.checksum, publishedBy: p.published_by,
+      publishedAt: p.published_at, setCurrent: p.set_current, replaced: p.replaced, action: p.action || 'publish',
+      restoredFromRevision: nn(p.restored_from_revision), via: nn(p.via),
+    })),
+    versions,
+  };
 }
 
 function cors(origin: string | null, allowed: string[]): Record<string, string> {
@@ -400,52 +466,45 @@ export async function handle(req: Request, env: Env): Promise<Response> {
       }
       // backup: todas as versões completas + metadados (somente publicadores autorizados)
       const [v, m, p, c] = await Promise.all([
-        get('painel_month_versions?select=' + VCOLS + ',data,summary&order=period_key.asc,revision.asc'),
+        get('painel_month_versions?select=' + VCOLS + ',data,summary,publication_id,created_at&order=period_key.asc,revision.asc'),
         get('painel_months?select=period_key,revision,checksum,file_name,published_at&order=period_key.asc'),
         get('painel_publications?select=*&order=id.asc'),
         get('painel_current?select=period_key,file_name,checksum,published_at&id=eq.1'),
       ]);
       if (v.status === 501) return reply(501, MIGRACAO);
       if ([v, m, p, c].some((x) => x.status !== 200)) return reply(502, { ok: false, error: 'Não foi possível ler os dados para o backup.' });
-      const exportedAt = new Date().toISOString();
-      // sha256 do JSON de cada versão (sempre) e, com o segredo configurado, assinatura HMAC
-      // deno-lint-ignore no-explicit-any
-      for (const x of v.rows as any[]) x.sha256 = await sha256hex(JSON.stringify(x.data));
-      let auth = null;
+      // O SERVIDOR monta o arquivo inteiro; o navegador só o salva. Com o segredo: formato 2 assinado
+      // (a assinatura é obrigatória nesse formato). Sem o segredo: formato 1, sem assinatura.
       const bs = backupSecret(env);
+      const content = await backupContent({ exportedAt: new Date().toISOString(), exportedBy: email, current: c.rows[0] || null, months: m.rows, publications: p.rows, versions: v.rows }, bs ? 2 : 1);
+      let backup: Record<string, unknown> = content;
       if (bs) {
-        const k = await hmacKey(bs.secret);
-        // deno-lint-ignore no-explicit-any
-        const ids = (v.rows as any[]).map((x) => ({ key: x.period_key, revision: x.revision, checksum: x.checksum, sha256: x.sha256 }));
-        // deno-lint-ignore no-explicit-any
-        for (let i = 0; i < ids.length; i++) (v.rows as any[])[i].sig = await hmacHex(k, versionMsg(ids[i]));
-        auth = { alg: 'HMAC-SHA256', keyId: bs.keyId, scheme: SIG_V, manifestSig: await hmacHex(k, manifestMsg(exportedAt, email, ids)) };
+        const contentSha256 = await sha256hex(canonical(content));
+        const sig = await hmacHex(await hmacKey(bs.secret), signedMsg(SCHEME, ALG, bs.keyId, contentSha256));
+        backup = { ...content, auth: { alg: ALG, scheme: SCHEME, keyId: bs.keyId, contentSha256, sig } };
       }
-      return reply(200, { ok: true, exportedAt, exportedBy: email, auth, current: c.rows[0] || null, months: m.rows, publications: p.rows, versions: v.rows });
+      return reply(200, { ok: true, backup });
     } catch (_e) {
       return reply(502, { ok: false, error: 'Sem conexão com o Supabase.' });
     }
   }
 
   // ------------------------------- autenticidade de um backup (só o servidor tem o segredo)
-  // Recebe só identificadores e o sha256 que o NAVEGADOR calculou sobre o dataJson do arquivo;
-  // não recebe os dados. Não grava nada.
+  // Recebe o envelope "auth" do arquivo e o SHA-256 que o NAVEGADOR calculou sobre a representação
+  // canônica do arquivo inteiro (sem "auth"). O servidor NÃO confia nesse resumo: recalcula o HMAC sobre
+  // ele e compara com a assinatura. Quem adultera o arquivo consegue recalcular o SHA-256, mas não a
+  // assinatura. Não recebe os dados e não grava nada.
   if (action === 'verify_backup') {
-    const bs = backupSecret(env);
-    if (!bs) return reply(200, { ok: true, configured: false, message: 'A assinatura de backups não está configurada neste servidor.' });
-    const vs = body.versions, a = body.auth;
-    if (!Array.isArray(vs) || !vs.length || vs.length > 2000) return reply(422, { ok: false, error: 'Lista de versões inválida.' });
-    // deno-lint-ignore no-explicit-any
-    const okId = (x: any) => x && keyOk(x.key) && Number.isInteger(x.revision) && x.revision >= 1 && typeof x.checksum === 'string' && x.checksum.length <= 64 && typeof x.sha256 === 'string' && /^[0-9a-f]{64}$/.test(x.sha256);
-    if (!vs.every(okId)) return reply(422, { ok: false, error: 'Identificação de versão inválida.' });
-    if (!a || a.alg !== 'HMAC-SHA256' || a.scheme !== SIG_V) return reply(200, { ok: true, configured: true, signed: false, keyId: bs.keyId });
-    if (a.keyId !== bs.keyId) return reply(200, { ok: true, configured: true, signed: true, keyKnown: false, keyId: bs.keyId });
-    const k = await hmacKey(bs.secret);
-    const results = [];
-    for (const x of vs) results.push({ key: x.key, revision: x.revision, valid: sameHex(x.sig, await hmacHex(k, versionMsg(x))) });
-    const manifestValid = typeof body.exportedAt === 'string' && typeof body.exportedBy === 'string' &&
-      sameHex(a.manifestSig, await hmacHex(k, manifestMsg(body.exportedAt, body.exportedBy, vs)));
-    return reply(200, { ok: true, configured: true, signed: true, keyKnown: true, keyId: bs.keyId, manifestValid, versions: results });
+    const configured = !!backupSecret(env);
+    const a = body.auth, h = body.contentSha256;
+    if (typeof h !== 'string' || !/^[0-9a-f]{64}$/.test(h)) return reply(422, { ok: false, error: 'Resumo SHA-256 do conteúdo inválido.' });
+    if (!a || typeof a !== 'object') return reply(200, { ok: true, configured, signed: false, valid: false });
+    if (a.alg !== ALG || a.scheme !== SCHEME || typeof a.sig !== 'string' || typeof a.keyId !== 'string')
+      return reply(200, { ok: true, configured, signed: true, schemeOk: false, valid: false });
+    const ks = verifySecret(env, a.keyId);
+    if (!ks) return reply(200, { ok: true, configured, signed: true, schemeOk: true, keyKnown: false, keyId: a.keyId, valid: false });
+    const valid = sameHex(a.sig, await hmacHex(await hmacKey(ks.secret), signedMsg(SCHEME, ALG, a.keyId, h)));
+    return reply(200, { ok: true, configured, signed: true, schemeOk: true, keyKnown: true, keyId: a.keyId, keyCurrent: ks.current, valid });
   }
 
   return reply(400, { ok: false, error: 'Ação desconhecida.' });
