@@ -39,7 +39,7 @@ Proteções:
 
 A carga inicial (`backfill`) copia a revisão vigente de cada mês já publicado.
 
-> **Revisões perdidas:** em produção, 2026-10 r1–r2 e 2026-11 r1–r3 foram sobrescritas antes desta melhoria. Só os metadados delas existem em `painel_publications`. A tela de versões as lista em "revisões anteriores ao histórico de versões (somente metadados)". Elas **não podem ser recuperadas**.
+> **Revisões perdidas:** em produção, 2026-10 r1–r2 e 2026-11 r1–r4 (6 revisões, situação em 09/11/2026) foram sobrescritas antes desta melhoria. Só os metadados delas existem em `painel_publications`. A tela de versões as lista em "revisões anteriores ao histórico de versões (somente metadados)". Elas **não podem ser recuperadas**.
 
 ### 2.1 O que o histórico NÃO guarda: o arquivo Excel original
 
@@ -181,14 +181,29 @@ Como a associação entre cada versão e seus metadados está toda no mesmo cont
    - estrutura e integridade: formato, FNV-1a e sha256 de cada versão, dados válidos, versões duplicadas;
    - correspondências: versão ↔ publicação (mesmo período, revisão, arquivo, checksum, publicador, operação, origem, caminho e corrente), mês ↔ versão vigente, e mês corrente na lista de meses;
    - cálculo do SHA-256 canônico do arquivo sem `auth`, comparado com o `contentSha256` registrado.
-2. **No servidor** (`verify_backup`, só publicadores): o navegador envia o envelope `auth` e o SHA-256 **que ele mesmo calculou**, sem os dados. O servidor **não confia** nesse resumo: recalcula o HMAC sobre ele e compara com `sig`, em tempo constante. Quem adultera o arquivo consegue recalcular os SHA-256, mas não produzir um HMAC válido sem o segredo.
+2. **No servidor** (`verify_backup`, só publicadores): o navegador envia o envelope `auth` e o SHA-256 **que ele mesmo calculou**, sem os dados. O servidor recalcula o HMAC sobre esse resumo e compara com `sig`, em tempo constante. Ele **não** aceita a assinatura para um resumo qualquer: só confirma "este resumo foi assinado por mim". Quem adultera o arquivo consegue recalcular os SHA-256, mas não produzir um HMAC válido sem o segredo.
 3. "Autêntico" só aparece quando os dois passos passam.
+
+### 6.5.1 O que o servidor garante e o que depende do navegador
+
+Para deixar claro o nível de segurança real:
+
+| Etapa | Onde acontece | Garantia |
+|---|---|---|
+| Assinar o backup | Servidor (Edge Function), com segredo que nunca sai dele | Só o servidor produz assinaturas válidas |
+| Calcular o SHA-256 canônico do arquivo e compará-lo com o `contentSha256` | **Navegador** | O servidor **não** recebe o arquivo e **não** confere, de forma independente, que o resumo enviado corresponde ao arquivo aberto. Essa correspondência é feita pelo código do painel. |
+| Conferir o HMAC do resumo | Servidor | Confirma que aquele resumo foi assinado pelo servidor com a chave indicada |
+| Bloquear a republicação de backups não autenticados | **Navegador (interface)** | O servidor não sabe se uma publicação veio de um backup |
+
+Análise de contorno pela API: um publicador autorizado que use a API diretamente pode, por exemplo, enviar à `verify_backup` o resumo de um backup legítimo e republicar outro conteúdo pela ação `publish`. Isso **não** dá a ele nenhum poder novo: ele já pode publicar qualquer conteúdo válido pelo fluxo normal (importando uma planilha), sempre como nova revisão, com validação do servidor e registro de quem publicou no histórico só-inclusão. Quem não está em `painel_publicadores` não chega a nenhuma dessas ações (401/403). A `verify_backup` só responde verdadeiro/falso: não assina conteúdo enviado por ninguém. A ação `backup` assina apenas o conteúdo que o próprio servidor lê do banco.
+
+Em resumo, a assinatura **protege a confiança no arquivo de backup** contra adulteração por quem não tem o segredo, conferida pelo painel com ajuda do servidor. Ela **não** é um controle de autorização de publicação: esse controle continua sendo o login mais a lista `painel_publicadores`.
 
 Estados mostrados na tela:
 
 | Estado | Significa | Republicar |
 |---|---|---|
-| **Autêntico** | HMAC do conteúdo integral conferido pelo servidor | Liberado |
+| **Autêntico** | O navegador conferiu que o arquivo corresponde ao resumo assinado, e o servidor conferiu o HMAC desse resumo | Liberado |
 | **Assinatura inválida: alguma informação protegida foi alterada** | O conteúdo não corresponde ao que o servidor assinou | Bloqueado |
 | **Assinatura inválida: a assinatura foi removida** | Formato 2 sem `auth` | Bloqueado |
 | **Assinatura inválida: algoritmo ou esquema alterado** | Envelope diferente de `ftr-painel-backup-v2` / `HMAC-SHA256` | Bloqueado |

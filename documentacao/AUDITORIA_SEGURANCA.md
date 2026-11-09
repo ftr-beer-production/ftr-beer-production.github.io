@@ -15,7 +15,7 @@ Feita em 06/11/2026 e revisada em 09/11/2026, **somente leitura** na produção 
 | Auth | O advisor recomenda ativar a proteção contra senhas vazadas | **Recomendação**: é uma opção gratuita do painel de Auth e afeta também o CIP. Depende de decisão sua. |
 | Funções SECURITY DEFINER do CIP | O advisor aponta avisos | Pertencem ao CIP: **não foram tocadas**. |
 
-Dados: 11 meses publicados, 16 publicações. As revisões 2026-10 r1–r2 e 2026-11 r1–r3 já perderam os dados (só restam os metadados). As r2 e r3 de 2026-11 têm o mesmo conteúdo, ou seja, foram uma republicação acidental. A nova detecção de conteúdo idêntico impede isso.
+Dados (09/11/2026, antes da implantação): 11 meses publicados, 17 publicações. As revisões 2026-10 r1–r2 e 2026-11 r1–r4 já perderam os dados (só restam os metadados). As r2 e r3 de 2026-11 têm o mesmo conteúdo, ou seja, foram uma republicação acidental. A nova detecção de conteúdo idêntico impede isso.
 
 ## Revisão corretiva (09/11/2026)
 
@@ -34,7 +34,7 @@ Dados: 11 meses publicados, 16 publicações. As revisões 2026-10 r1–r2 e 202
 | Ponto | Encontrado | Corrigido |
 |---|---|---|
 | Cobertura da assinatura | O esquema `ftr-painel-backup-v1` assinava, por versão, só período, revisão, checksum e sha256 dos dados, mais um manifesto com data, autor e lista de versões. Arquivo de origem, publicador e data de cada versão, tipo de operação, revisão de origem, caminho v1/v2, versão corrente, meses, publicações e versão corrente ficavam **fora** da proteção. | Esquema `ftr-painel-backup-v2`: HMAC-SHA256 sobre o SHA-256 do **JSON canônico RFC 8785 do arquivo inteiro** (tudo exceto o envelope `auth`). O arquivo é montado pelo servidor. Esquema, algoritmo e `keyId` entram na mensagem assinada. |
-| Verificação | O servidor conferia assinaturas por versão; um backup com versões válidas e outros campos adulterados podia passar parcialmente | `verify_backup` confere uma única assinatura do conteúdo integral, sobre o resumo calculado pelo navegador, sem confiar nele. A tela só mostra "Autêntico" com esse HMAC válido. |
+| Verificação | O servidor conferia assinaturas por versão; um backup com versões válidas e outros campos adulterados podia passar parcialmente | `verify_backup` confere uma única assinatura: o HMAC do resumo do conteúdo integral, resumo que o **navegador** calcula a partir do arquivo. A correspondência arquivo ↔ resumo é conferida no navegador, não no servidor. A tela só mostra "Autêntico" com os dois passos aprovados. |
 | Assinatura removida | Um backup sem `auth` era só "sem assinatura" | No formato 2 a assinatura é obrigatória: sem ela, "Assinatura inválida: a assinatura foi removida", e a republicação fica bloqueada |
 | Republicação | Bloqueada só para versões com assinatura inválida | Liberada só para backup autêntico, ou legado com confirmação consciente |
 | Testes | Adulteração de dados e de lista de versões | 23 cenários de adulteração com FNV-1a e SHA-256 recalculados (todos os campos pedidos e mais), todos recusados pelo servidor, mais testes de envelope, ordem de propriedades, rebaixamento e rotação |
@@ -47,7 +47,14 @@ Dados: 11 meses publicados, 16 publicações. As revisões 2026-10 r1–r2 e 202
 - Concorrência: o advisory lock é único para v1, v2 e recuperação, e o fluxo moderno sempre confere a revisão esperada dentro da transação.
 - A Edge Function aplica o login, a lista de publicadores e a origem a **todas** as ações, inclusive leitura de versões, backup e `verify_backup`. O corpo da requisição só é lido depois da autorização.
 - Segredos: a chave secreta do projeto e o segredo HMAC (quando configurado) existem só no ambiente da Edge Function. Os testes confirmam que nenhuma resposta contém `sb_secret` ou o segredo HMAC. O `docs/` contém só a chave publicável.
-- `verify_backup` recebe só o envelope da assinatura e o SHA-256 canônico calculado pelo navegador (não os dados). Recalcula o HMAC sobre esse resumo, compara em tempo constante e não grava nada.
+- `verify_backup` recebe só o envelope da assinatura e o SHA-256 canônico calculado pelo navegador (não os dados). Recalcula o HMAC sobre esse resumo, compara em tempo constante e não grava nada. **O servidor não confere de forma independente que esse resumo corresponde ao arquivo:** isso é feito no navegador. O bloqueio da republicação de backups não autenticados também é da interface.
+
+## Análise de contorno pela API (auditoria final, 09/11/2026)
+
+- Sem login de publicador autorizado, todas as ações (`publish`, `restore`, `versions`, `version`, `backup`, `verify_backup`) respondem 401/403 antes de ler o corpo.
+- Um publicador autorizado pode chamar a API sem o painel: enviar à `verify_backup` o resumo de um backup legítimo e, separadamente, publicar outro conteúdo. Isso não amplia o que ele já pode fazer (publicar qualquer conteúdo válido, sempre como nova revisão, com validação do servidor, conferência de revisão e registro do publicador no histórico só-inclusão). Ou seja, a assinatura protege a confiança no backup contra quem não tem o segredo; não é um controle de autorização.
+- A `verify_backup` não é um "oráculo de assinatura": responde só verdadeiro/falso, nunca devolve uma assinatura. A ação `backup` assina apenas o conteúdo que o servidor lê do próprio banco.
+- Os logs da Edge Function (`console.error`/`console.warn`) registram status e respostas do PostgREST, e o e-mail de quem publica pelo caminho de compatibilidade. Nunca registram chaves ou o segredo HMAC.
 - Isolamento do CIP: um teste confirma que migration e rollback só criam objetos `painel_*`. Nenhum objeto do CIP é alterado.
 - Exportações e o backup são gerados no navegador ou na Edge Function existente. Nenhum serviço externo ou pago foi incluído.
 

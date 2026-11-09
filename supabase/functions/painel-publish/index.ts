@@ -22,7 +22,8 @@
 //   version  — dados completos de uma versão, para prévia
 //   backup   — o ARQUIVO de backup completo, montado aqui (formato 2 assinado por HMAC-SHA256 sobre o
 //              conteúdo integral, quando PAINEL_BACKUP_HMAC_KEY existe; senão formato 1, sem assinatura)
-//   verify_backup — confere a assinatura do conteúdo integral de um backup (só o servidor tem o segredo)
+//   verify_backup — confere o HMAC do resumo do conteúdo integral, resumo calculado pelo NAVEGADOR a partir do
+//              arquivo (a correspondência arquivo ↔ resumo é conferida no navegador; só o servidor tem o segredo)
 // A gravação usa a chave secreta do próprio projeto (variável padrão das Edge Functions),
 // que nunca sai do Supabase. Implantar com verify_jwt = false: o login é conferido no código.
 // Validação dos dados idêntica à antiga função do Netlify (netlify/functions/painel-publish.mjs).
