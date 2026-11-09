@@ -22,7 +22,7 @@ function ambiente(src) {
     linha(src, /const DBN='ftr-painel',STORE='imports',FMT=2;/) + '\n' + linha(src, /function fnv\(s\)\{[^\n]*/) + '\n' + linha(src, /const jsonOf=[^\n]*/) + '\n' +
     linha(src, /function validateData\(d\)\{[\s\S]*?return null\}/) + '\n' + (src.includes('/*PURE2_START*/') ? bloco(src, '/*PURE2_START*/', '/*PURE2_END*/') : '') +
     '\n;globalThis.__ = {parseWorkbook,summarize,pkeyOf,keyLabel,stageReadings,mkReadingsOf,chk,mkReadings,fnv,jsonOf,validateData,FMT,SLOTS,' +
-    (src.includes('reviewImport') ? 'reviewImport,summaryDiff,periodFromName,exportTables,csvCell,toCsv,sheetCells,xlSerial,buildServerBackup,checkServerBackup' : '') + '}';
+    (src.includes('reviewImport') ? 'reviewImport,summaryDiff,periodFromName,exportTables,csvCell,toCsv,sheetCells,xlSerial,buildServerBackup,checkServerBackup,fnv' : '') + '}';
   const ctx = vm.createContext({ console, Intl, Date, Math, JSON, Object, Array, String, Number, Set, Map, RegExp, isFinite, isNaN, parseFloat });
   vm.runInContext(code, ctx); return ctx.__;
 }
@@ -137,4 +137,22 @@ test('backup do servidor: gerado, validado e com integridade verificada', () => 
   const per = JSON.parse(JSON.stringify(o)); per.versions[0].key = '2026-09'; assert.ok(N.checkServerBackup(per).P.some((x) => x.includes('período dos dados não confere')));
   const falta = JSON.parse(JSON.stringify(o)); falta.months[0].revision = 9; assert.ok(N.checkServerBackup(falta).W.some((x) => x.includes('r9')));
   assert.ok(N.checkServerBackup({ format: 'outro' }).P.length > 0);
+  // limitação: adulteração com recálculo do FNV passa na integridade (por isso existe a assinatura do servidor)
+  const recalc = JSON.parse(JSON.stringify(o)); const vr = recalc.versions[1]; vr.dataJson = vr.dataJson.replace('"meta":92', '"meta":99'); vr.integrity = N.fnv(vr.dataJson);
+  eq(N.checkServerBackup(recalc).P, []);
+});
+
+test('backup do servidor: campos de autenticidade opcionais e compatibilidade com backups antigos', () => {
+  const resp = { exportedAt: 't', exportedBy: 'p@x', auth: { alg: 'HMAC-SHA256', keyId: 'k1', scheme: 'ftr-painel-backup-v1', manifestSig: 'a'.repeat(64) },
+    months: [{ period_key: '2026-10', revision: 1 }], publications: [],
+    versions: [{ period_key: '2026-10', revision: 1, file_name: 'f.xlsx', checksum: 'ck', published_by: 'p', published_at: 't', action: 'publish', via: 'v1', set_current: true, data: REAL, sha256: 'b'.repeat(64), sig: 'c'.repeat(64) }] };
+  const o = JSON.parse(JSON.stringify(N.buildServerBackup(resp)));
+  assert.equal(o.version, 1, 'formato continua na versão 1');
+  eq([o.auth.alg, o.versions[0].sha256, o.versions[0].sig, o.versions[0].via], ['HMAC-SHA256', 'b'.repeat(64), 'c'.repeat(64), 'v1']);
+  assert.equal(N.checkServerBackup(o).V.length, 1);
+  // backup antigo (sem auth/sha256/sig/via) continua válido
+  const antigo = JSON.parse(JSON.stringify(o)); delete antigo.auth; antigo.versions.forEach((v) => { delete v.sha256; delete v.sig; delete v.via; });
+  eq(N.checkServerBackup(antigo).P, []);
+  // sem assinatura do servidor, o backup é gerado com auth = null
+  assert.equal(N.buildServerBackup({ ...resp, auth: undefined }).auth, null);
 });

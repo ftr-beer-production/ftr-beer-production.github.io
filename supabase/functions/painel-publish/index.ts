@@ -5,13 +5,24 @@
 //   1) o token do usuário (Supabase Auth) é conferido no Supabase;
 //   2) o e-mail precisa estar confirmado e constar na tabela privada public.painel_publicadores;
 //   3) a origem do navegador precisa estar em DEFAULT_ORIGINS (ou ALLOWED_ORIGINS).
-// Ações (campo "action" do corpo JSON; ausente = "publish", compatível com o painel antigo):
-//   publish  — publica um mês (painel_publish_v2: recusa conteúdo idêntico e conferência
-//              desatualizada via expectedRevision; sem a migration 001, usa painel_publish v1)
-//   restore  — recupera uma versão antiga como NOVA revisão (painel_restore_version)
+// Ações (campo "action" do corpo JSON; ausente = "publish"):
+//   publish  — publica um mês. Dois caminhos, escolhidos pelo CORPO da requisição:
+//     * MODERNO (painel novo): corpo com "protocol": 2 e/ou o campo "expectedRevision".
+//       A revisão esperada é OBRIGATÓRIA (inteiro >= 0; 0 = mês novo). Sem ela: 428.
+//       Grava por painel_publish_v2 (recusa conteúdo idêntico e conferência desatualizada).
+//       Se a v2 não existir no banco: 501 — NUNCA cai para a v1 sem conferência.
+//     * COMPATIBILIDADE (painel antigo do main, durante a transição): corpo sem "protocol"
+//       e sem "expectedRevision". Grava por painel_publish v1, exatamente como antes; com a
+//       migration aplicada, o gatilho captura a versão completa (via = 'v1'). A resposta
+//       traz legacy: true e path: 'compatibilidade'. Desligável com PAINEL_LEGACY_PUBLISH=off
+//       (só depois de o painel novo estar publicado).
+//   restore  — recupera uma versão antiga como NOVA revisão (painel_restore_version);
+//              revisão esperada sempre obrigatória
 //   versions — lista o histórico de versões (metadados; sem os dados)
 //   version  — dados completos de uma versão, para prévia
-//   backup   — todas as versões completas + metadados, para backup
+//   backup   — todas as versões completas + metadados, para backup (com assinatura HMAC
+//              opcional: ver PAINEL_BACKUP_HMAC_KEY)
+//   verify_backup — confere a assinatura HMAC de um backup (só o servidor tem o segredo)
 // A gravação usa a chave secreta do próprio projeto (variável padrão das Edge Functions),
 // que nunca sai do Supabase. Implantar com verify_jwt = false: o login é conferido no código.
 // Validação dos dados idêntica à antiga função do Netlify (netlify/functions/painel-publish.mjs).
@@ -143,6 +154,34 @@ function validatePayload(d, key) {
 }
 
 
+// ---- autenticidade dos backups (HMAC-SHA256 com segredo que só existe no servidor) ----
+// Ativada só quando PAINEL_BACKUP_HMAC_KEY (>= 32 caracteres) está configurada nos segredos da
+// Edge Function. Sem ela, o backup sai sem assinatura (comportamento anterior). O navegador
+// nunca recebe o segredo: só as assinaturas, que ele não consegue recalcular.
+const SIG_V = 'ftr-painel-backup-v1';
+const enc = new TextEncoder();
+const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+async function sha256hex(s: string): Promise<string> { return hex(await crypto.subtle.digest('SHA-256', enc.encode(s))); }
+async function hmacKey(secret: string) {
+  return crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+async function hmacHex(key: CryptoKey, msg: string): Promise<string> { return hex(await crypto.subtle.sign('HMAC', key, enc.encode(msg))); }
+function sameHex(a: unknown, b: string): boolean { // comparação em tempo constante
+  if (typeof a !== 'string' || a.length !== b.length) return false;
+  let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+// deno-lint-ignore no-explicit-any
+const versionMsg = (v: any) => [SIG_V, 'version', v.key, v.revision, v.checksum, v.sha256].join('|');
+// deno-lint-ignore no-explicit-any
+const manifestMsg = (exportedAt: string, exportedBy: string, vs: any[]) =>
+  [SIG_V, 'manifest', exportedAt, exportedBy, vs.map((v) => v.key + ':' + v.revision + ':' + v.sha256).join(',')].join('|');
+function backupSecret(env: Env): { secret: string; keyId: string } | null {
+  const secret = (env('PAINEL_BACKUP_HMAC_KEY') || '').trim();
+  if (secret.length < 32) return null;
+  return { secret, keyId: (env('PAINEL_BACKUP_HMAC_KEY_ID') || 'k1').trim().slice(0, 32) };
+}
+
 function cors(origin: string | null, allowed: string[]): Record<string, string> {
   if (!origin || !allowed.includes(origin)) return { Vary: 'Origin' };
   return {
@@ -213,10 +252,14 @@ export async function handle(req: Request, env: Env): Promise<Response> {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return reply(400, { ok: false, error: 'Requisição inválida.' });
 
   const action = body.action == null ? 'publish' : String(body.action);
+  if (body.protocol != null && body.protocol !== 2) return reply(400, { ok: false, error: 'Versão de protocolo não suportada.' });
+  // Cliente moderno: declara o protocolo 2 OU envia o campo expectedRevision (mesmo que null).
+  const modern = body.protocol === 2 || Object.prototype.hasOwnProperty.call(body, 'expectedRevision');
   const api = (path: string, init: RequestInit = {}) => fetch(SB + '/rest/v1/' + path, { ...init, headers: { ...adm, ...(init.headers || {}) } });
   const expectedOf = (v: unknown) => (v == null ? null : Number.isInteger(v) && (v as number) >= 0 ? (v as number) : NaN);
   const revOf = (v: unknown) => (Number.isInteger(v) && (v as number) >= 1 ? (v as number) : NaN);
-  const MIGRACAO = { ok: false, code: 'migracao_pendente', error: 'O histórico de versões ainda não foi ativado no banco (migration 001 pendente).' };
+  const MIGRACAO = { ok: false, code: 'migracao_pendente', error: 'O histórico de versões ainda não foi ativado no banco (migration pendente). Nada foi gravado.' };
+  const SEM_REVISAO = { ok: false, code: 'revisao_esperada_ausente', error: 'A revisão vigente conferida (expectedRevision) é obrigatória. Nada foi gravado: atualize o painel e confira novamente.' };
   // Erros PTxxx das funções SQL chegam com o status HTTP xxx e { code, message, details }.
   // deno-lint-ignore no-explicit-any
   const rpcError = async (res: Response): Promise<Response> => {
@@ -232,18 +275,22 @@ export async function handle(req: Request, env: Env): Promise<Response> {
       return reply(409, { ok: false, code: 'revisao_alterada', currentRevision: det && det.current, expectedRevision: det && det.expected, error: 'Outra publicação deste mês aconteceu depois da sua conferência. Nada foi gravado: atualize e confira novamente.' });
     if (res.status === 404 && msg.includes('versao_inexistente')) return reply(404, { ok: false, code: 'versao_inexistente', error: 'Esta versão não existe no histórico.' });
     if (res.status === 404 && msg.includes('mes_inexistente')) return reply(404, { ok: false, code: 'mes_inexistente', error: 'Este mês ainda não foi publicado.' });
+    if (res.status === 428 && msg.includes('revisao_esperada_ausente')) return reply(428, SEM_REVISAO);
     console.error('rpc falhou', res.status, txt.slice(0, 500));
     return reply(502, { ok: false, error: 'Falha ao gravar no banco. A versão anterior foi preservada.' });
   };
   const missingObject = (status: number, txt: string) => status === 404 && /PGRST20[25]|42P01|42883|Could not find/i.test(txt);
   const keyOk = (k: unknown): k is string => typeof k === 'string' && KEY_RE.test(k);
-  const VCOLS = 'id,period_key,revision,file_name,checksum,published_by,published_at,action,restored_from_revision,set_current';
+  const VCOLS = 'id,period_key,revision,file_name,checksum,published_by,published_at,action,restored_from_revision,set_current,via';
 
   // ---------------------------------------------------------------- publicar
   if (action === 'publish') {
     const { file, periodKey, checksum, dataJson } = body;
     const setCurrent = body.setCurrent === false ? false : true;
     const expected = expectedOf(body.expectedRevision);
+    if (!modern && (env('PAINEL_LEGACY_PUBLISH') || '').trim().toLowerCase() === 'off')
+      return reply(426, { ok: false, code: 'cliente_desatualizado', error: 'Esta versão do painel está desatualizada. Recarregue a página (Ctrl+F5) e publique novamente.' });
+    if (modern && expected == null) return reply(428, SEM_REVISAO);
     if (!keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
     if (typeof file !== 'string' || !file.trim() || file.length > 255 || /[\u0000-\u001f]/.test(file)) return reply(422, { ok: false, error: 'Nome de arquivo inválido.' });
     if (typeof dataJson !== 'string' || typeof checksum !== 'string') return reply(422, { ok: false, error: 'Dados ausentes.' });
@@ -260,14 +307,18 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     let summary: any = null;
     try { summary = summarize(d); } catch (_e) { return reply(422, { ok: false, error: 'Não foi possível calcular o resumo dos dados.' }); }
 
-    // 4) gravação atômica: painel_publish_v2 (conteúdo idêntico + concorrência); sem a migration, cai para a v1
+    // 4) gravação atômica
     const args = { p_period_key: periodKey, p_file_name: file.trim(), p_checksum: checksum, p_data: d, p_summary: summary, p_published_by: email, p_set_current: setCurrent };
-    let res: Response, legacy = false;
+    let res: Response;
     try {
-      res = await api('rpc/painel_publish_v2', { method: 'POST', body: JSON.stringify({ ...args, p_expected_revision: expected }) });
-      if (res.status === 404) {
-        const txt = await res.clone().text();
-        if (missingObject(404, txt)) { legacy = true; res = await api('rpc/painel_publish', { method: 'POST', body: JSON.stringify(args) }); }
+      if (modern) {
+        // fluxo moderno: SOMENTE a v2, com a revisão esperada; falha nunca vira publicação sem conferência
+        res = await api('rpc/painel_publish_v2', { method: 'POST', body: JSON.stringify({ ...args, p_expected_revision: expected }) });
+        if (res.status === 404 && missingObject(404, await res.clone().text())) return reply(501, MIGRACAO);
+      } else {
+        // caminho de compatibilidade (painel antigo): v1, como sempre foi
+        console.warn('publicação pelo caminho de compatibilidade (v1)', periodKey, email);
+        res = await api('rpc/painel_publish', { method: 'POST', body: JSON.stringify(args) });
       }
     } catch (_e) {
       return reply(502, { ok: false, error: 'Sem conexão com o Supabase. A versão anterior foi preservada.' });
@@ -277,7 +328,8 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     return reply(200, {
       ok: true, key: periodKey, checksum, publishedAt: out.published_at, revision: out.revision,
       previousRevision: out.previous_revision ?? null, replaced: !!out.replaced, currentSet: !!out.current_set,
-      action: 'publish', legacy,
+      action: 'publish', legacy: !modern, path: modern ? 'moderno' : 'compatibilidade',
+      ...(modern ? {} : { notice: 'Publicado pelo caminho de compatibilidade (painel antigo): sem conferência de revisão e sem detecção de conteúdo idêntico.' }),
     });
   }
 
@@ -287,7 +339,8 @@ export async function handle(req: Request, env: Env): Promise<Response> {
     const revision = revOf(body.revision), expected = expectedOf(body.expectedRevision);
     if (!keyOk(periodKey)) return reply(422, { ok: false, error: 'Período inválido.' });
     if (Number.isNaN(revision)) return reply(422, { ok: false, error: 'Revisão inválida.' });
-    if (expected == null || Number.isNaN(expected)) return reply(422, { ok: false, error: 'Informe a revisão vigente conferida (expectedRevision).' });
+    if (expected == null) return reply(428, SEM_REVISAO);
+    if (Number.isNaN(expected)) return reply(422, { ok: false, error: 'Revisão esperada inválida.' });
     let res: Response;
     try {
       res = await api('rpc/painel_restore_version', { method: 'POST', body: JSON.stringify({
@@ -354,10 +407,45 @@ export async function handle(req: Request, env: Env): Promise<Response> {
       ]);
       if (v.status === 501) return reply(501, MIGRACAO);
       if ([v, m, p, c].some((x) => x.status !== 200)) return reply(502, { ok: false, error: 'Não foi possível ler os dados para o backup.' });
-      return reply(200, { ok: true, exportedAt: new Date().toISOString(), exportedBy: email, current: c.rows[0] || null, months: m.rows, publications: p.rows, versions: v.rows });
+      const exportedAt = new Date().toISOString();
+      // sha256 do JSON de cada versão (sempre) e, com o segredo configurado, assinatura HMAC
+      // deno-lint-ignore no-explicit-any
+      for (const x of v.rows as any[]) x.sha256 = await sha256hex(JSON.stringify(x.data));
+      let auth = null;
+      const bs = backupSecret(env);
+      if (bs) {
+        const k = await hmacKey(bs.secret);
+        // deno-lint-ignore no-explicit-any
+        const ids = (v.rows as any[]).map((x) => ({ key: x.period_key, revision: x.revision, checksum: x.checksum, sha256: x.sha256 }));
+        // deno-lint-ignore no-explicit-any
+        for (let i = 0; i < ids.length; i++) (v.rows as any[])[i].sig = await hmacHex(k, versionMsg(ids[i]));
+        auth = { alg: 'HMAC-SHA256', keyId: bs.keyId, scheme: SIG_V, manifestSig: await hmacHex(k, manifestMsg(exportedAt, email, ids)) };
+      }
+      return reply(200, { ok: true, exportedAt, exportedBy: email, auth, current: c.rows[0] || null, months: m.rows, publications: p.rows, versions: v.rows });
     } catch (_e) {
       return reply(502, { ok: false, error: 'Sem conexão com o Supabase.' });
     }
+  }
+
+  // ------------------------------- autenticidade de um backup (só o servidor tem o segredo)
+  // Recebe só identificadores e o sha256 que o NAVEGADOR calculou sobre o dataJson do arquivo;
+  // não recebe os dados. Não grava nada.
+  if (action === 'verify_backup') {
+    const bs = backupSecret(env);
+    if (!bs) return reply(200, { ok: true, configured: false, message: 'A assinatura de backups não está configurada neste servidor.' });
+    const vs = body.versions, a = body.auth;
+    if (!Array.isArray(vs) || !vs.length || vs.length > 2000) return reply(422, { ok: false, error: 'Lista de versões inválida.' });
+    // deno-lint-ignore no-explicit-any
+    const okId = (x: any) => x && keyOk(x.key) && Number.isInteger(x.revision) && x.revision >= 1 && typeof x.checksum === 'string' && x.checksum.length <= 64 && typeof x.sha256 === 'string' && /^[0-9a-f]{64}$/.test(x.sha256);
+    if (!vs.every(okId)) return reply(422, { ok: false, error: 'Identificação de versão inválida.' });
+    if (!a || a.alg !== 'HMAC-SHA256' || a.scheme !== SIG_V) return reply(200, { ok: true, configured: true, signed: false, keyId: bs.keyId });
+    if (a.keyId !== bs.keyId) return reply(200, { ok: true, configured: true, signed: true, keyKnown: false, keyId: bs.keyId });
+    const k = await hmacKey(bs.secret);
+    const results = [];
+    for (const x of vs) results.push({ key: x.key, revision: x.revision, valid: sameHex(x.sig, await hmacHex(k, versionMsg(x))) });
+    const manifestValid = typeof body.exportedAt === 'string' && typeof body.exportedBy === 'string' &&
+      sameHex(a.manifestSig, await hmacHex(k, manifestMsg(body.exportedAt, body.exportedBy, vs)));
+    return reply(200, { ok: true, configured: true, signed: true, keyKnown: true, keyId: bs.keyId, manifestValid, versions: results });
   }
 
   return reply(400, { ok: false, error: 'Ação desconhecida.' });

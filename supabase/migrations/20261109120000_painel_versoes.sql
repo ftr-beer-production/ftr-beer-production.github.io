@@ -1,5 +1,5 @@
 -- =====================================================================
--- Painel FTR · Migration 001 · Histórico completo de versões publicadas
+-- Painel FTR · Migration 20261109120000 · Histórico completo de versões publicadas
 -- ---------------------------------------------------------------------
 -- O QUE FAZ (somente alterações ADITIVAS; nada existente é removido):
 --   1. painel_publications ganha as colunas "action" e "restored_from_revision".
@@ -15,15 +15,23 @@
 --   5. Bloqueia UPDATE/DELETE/TRUNCATE no histórico e na auditoria.
 --   6. Novas funções (somente service_role):
 --        painel_publish_v2      — publicação com detecção de conteúdo idêntico
---                                 e controle de concorrência por revisão esperada;
---        painel_restore_version — recupera uma versão antiga como NOVA revisão.
+--                                 e revisão esperada OBRIGATÓRIA (concorrência);
+--        painel_restore_version — recupera uma versão antiga como NOVA revisão
+--                                 (revisão esperada obrigatória; recusa conteúdo
+--                                 idêntico por checksum OU por JSONB).
+--   A v1 (painel_publish) continua existindo: é o caminho de COMPATIBILIDADE
+--   usado pela Edge Function só para o painel antigo durante a transição.
 --
 -- O QUE NÃO FAZ: não altera painel_months, painel_current, painel_publish (v1),
 -- painel_publicadores, nem nenhum objeto do CIP. Leitura pública inalterada.
 --
 -- ORDEM: aplicar esta migration ANTES de implantar a nova Edge Function.
--- (A nova Edge Function também funciona sem ela, caindo para painel_publish v1.)
--- ROLLBACK: 20261106_001_painel_versoes_rollback.sql (não destrutivo).
+-- (Sem ela, a nova Edge Function só atende o painel antigo, pelo caminho v1.)
+-- ROLLBACK: supabase/rollback/20261109120000_painel_versoes_rollback.sql
+-- (fora da pasta migrations para nunca ser aplicado por engano; não destrutivo).
+-- Projeto Supabase COMPARTILHADO com o CIP: aplicar manualmente (SQL Editor ou
+-- apply_migration) com esta mesma versão; não usar "supabase db push" deste
+-- repositório, pois o histórico remoto contém migrations do CIP.
 -- Idempotente: pode ser executada mais de uma vez.
 -- =====================================================================
 begin;
@@ -35,7 +43,17 @@ alter table public.painel_publications
   add column if not exists action text not null default 'publish';
 alter table public.painel_publications
   add column if not exists restored_from_revision integer;
+-- Por qual caminho a publicação foi gravada:
+--   v1 = painel_publish (caminho de COMPATIBILIDADE do painel antigo; também todas as
+--        publicações anteriores a esta migration, que só podiam ser feitas pela v1);
+--   v2 = painel_publish_v2 / painel_restore_version (fluxo moderno, com revisão esperada).
+alter table public.painel_publications
+  add column if not exists via text not null default 'v1';
 do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'painel_publications_via_chk') then
+    alter table public.painel_publications
+      add constraint painel_publications_via_chk check (via in ('v1', 'v2'));
+  end if;
   if not exists (select 1 from pg_constraint where conname = 'painel_publications_action_chk') then
     alter table public.painel_publications
       add constraint painel_publications_action_chk check (action in ('publish', 'restore'));
@@ -66,6 +84,8 @@ create table if not exists public.painel_month_versions (
   restored_from_revision integer,
   -- se esta publicação passou a ser a versão corrente (painel_current) no momento em que foi feita
   set_current            boolean not null,
+  -- caminho da publicação (v1 = compatibilidade/painel antigo, v2 = fluxo moderno)
+  via                    text not null default 'v1' check (via in ('v1', 'v2')),
   publication_id         bigint unique,
   created_at             timestamptz not null default now(),
   constraint painel_month_versions_period_rev_uq unique (period_key, revision),
@@ -84,13 +104,13 @@ revoke all on public.painel_month_versions from public, anon, authenticated;
 -- ---------------------------------------------------------------------
 insert into public.painel_month_versions
   (period_key, revision, file_name, checksum, data, summary, published_by,
-   published_at, action, restored_from_revision, set_current, publication_id)
+   published_at, action, restored_from_revision, set_current, publication_id, via)
 select m.period_key, m.revision, m.file_name, m.checksum, m.data, m.summary,
        coalesce(p.published_by, 'desconhecido (anterior ao histórico de versões)'),
-       m.published_at, 'backfill', null, coalesce(p.set_current, false), p.id
+       m.published_at, 'backfill', null, coalesce(p.set_current, false), p.id, coalesce(p.via, 'v1')
   from public.painel_months m
   left join lateral (
-        select x.id, x.published_by, x.set_current
+        select x.id, x.published_by, x.set_current, x.via
           from public.painel_publications x
          where x.period_key = m.period_key and x.revision = m.revision
          order by x.id desc limit 1) p on true
@@ -120,10 +140,10 @@ begin
   end if;
   insert into public.painel_month_versions
     (period_key, revision, file_name, checksum, data, summary, published_by,
-     published_at, action, restored_from_revision, set_current, publication_id)
+     published_at, action, restored_from_revision, set_current, publication_id, via)
   values
     (new.period_key, new.revision, new.file_name, new.checksum, v_data, v_summary, new.published_by,
-     new.published_at, new.action, new.restored_from_revision, new.set_current, new.id);
+     new.published_at, new.action, new.restored_from_revision, new.set_current, new.id, new.via);
   return new;
 end;
 $$;
@@ -165,6 +185,7 @@ create trigger painel_publications_no_truncate   before truncate on public.paine
 -- ---------------------------------------------------------------------
 -- 6a. Publicação v2 (mesmas gravações da v1 + proteções)
 --   Erros com SQLSTATE PTxxx viram o status HTTP xxx na API REST:
+--     PT428 revisao_esperada_ausente — a revisão esperada é obrigatória
 --     PT409 conteudo_identico  — o mês já está publicado com este mesmo conteúdo
 --     PT409 revisao_alterada   — outra publicação aconteceu depois da conferência
 -- ---------------------------------------------------------------------
@@ -205,7 +226,11 @@ begin
   if p_published_by is null or p_published_by = '' then
     raise exception 'publicador ausente' using errcode = '22023';
   end if;
-  if p_expected_revision is not null and p_expected_revision < 0 then
+  -- A v2 NUNCA publica sem conferir a revisão que o publicador viu (0 = mês novo).
+  if p_expected_revision is null then
+    raise exception 'revisao_esperada_ausente' using errcode = 'PT428';
+  end if;
+  if p_expected_revision < 0 then
     raise exception 'revisao esperada invalida' using errcode = '22023';
   end if;
 
@@ -215,7 +240,7 @@ begin
   select revision, checksum, data into v_prev, v_prev_ck, v_prev_data
     from public.painel_months where period_key = p_period_key;
 
-  if p_expected_revision is not null and coalesce(v_prev, 0) <> p_expected_revision then
+  if coalesce(v_prev, 0) <> p_expected_revision then
     raise exception 'revisao_alterada'
       using errcode = 'PT409',
             detail  = jsonb_build_object('expected', p_expected_revision, 'current', coalesce(v_prev, 0))::text;
@@ -254,9 +279,9 @@ begin
 
   -- O gatilho grava a versão completa em painel_month_versions.
   insert into public.painel_publications
-    (period_key, file_name, checksum, published_by, set_current, replaced, revision, published_at, action)
+    (period_key, file_name, checksum, published_by, set_current, replaced, revision, published_at, action, via)
   values
-    (p_period_key, p_file_name, p_checksum, p_published_by, v_set, v_prev is not null, v_rev, v_at, 'publish');
+    (p_period_key, p_file_name, p_checksum, p_published_by, v_set, v_prev is not null, v_rev, v_at, 'publish', 'v2');
 
   return jsonb_build_object(
     'period_key',        p_period_key,
@@ -273,8 +298,10 @@ $$;
 -- ---------------------------------------------------------------------
 -- 6b. Recuperação de versão: cria uma NOVA revisão com os dados da versão
 --     escolhida. Nada é apagado; tudo em uma transação.
+--     PT428 revisao_esperada_ausente (a revisão esperada é obrigatória)
 --     PT404 mes_inexistente / versao_inexistente
---     PT409 conteudo_identico (a versão escolhida já é o conteúdo vigente)
+--     PT409 conteudo_identico (a versão escolhida tem o mesmo checksum OU o
+--                              mesmo conteúdo JSONB da versão vigente)
 --     PT409 revisao_alterada  (outra publicação aconteceu depois da conferência)
 -- ---------------------------------------------------------------------
 create or replace function public.painel_restore_version(
@@ -304,6 +331,9 @@ begin
   if p_published_by is null or p_published_by = '' then
     raise exception 'publicador ausente' using errcode = '22023';
   end if;
+  if p_expected_revision is null then
+    raise exception 'revisao_esperada_ausente' using errcode = 'PT428';
+  end if;
 
   perform pg_advisory_xact_lock(hashtext('painel_publish'));
 
@@ -311,7 +341,7 @@ begin
   if not found then
     raise exception 'mes_inexistente' using errcode = 'PT404';
   end if;
-  if p_expected_revision is not null and v_month.revision <> p_expected_revision then
+  if v_month.revision <> p_expected_revision then
     raise exception 'revisao_alterada'
       using errcode = 'PT409',
             detail  = jsonb_build_object('expected', p_expected_revision, 'current', v_month.revision)::text;
@@ -322,7 +352,9 @@ begin
   if not found then
     raise exception 'versao_inexistente' using errcode = 'PT404';
   end if;
-  if v_ver.checksum = v_month.checksum then
+  -- Mesmo critério da publicação: checksum igual OU JSONB igual (o tipo jsonb
+  -- normaliza a ordem das chaves, então ordem diferente não gera falsa diferença).
+  if v_ver.checksum = v_month.checksum or v_ver.data = v_month.data then
     raise exception 'conteudo_identico'
       using errcode = 'PT409',
             detail  = jsonb_build_object('current', v_month.revision)::text;
@@ -357,10 +389,10 @@ begin
 
   insert into public.painel_publications
     (period_key, file_name, checksum, published_by, set_current, replaced, revision, published_at,
-     action, restored_from_revision)
+     action, restored_from_revision, via)
   values
     (p_period_key, v_ver.file_name, v_ver.checksum, p_published_by, v_set, true, v_rev, v_at,
-     'restore', p_revision);
+     'restore', p_revision, 'v2');
 
   return jsonb_build_object(
     'period_key',             p_period_key,

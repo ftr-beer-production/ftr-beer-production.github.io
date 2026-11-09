@@ -67,7 +67,7 @@ test('preflight e origem', async () => {
 });
 
 test('autenticação e autorização valem para TODAS as ações', async () => {
-  for (const action of ['publish', 'restore', 'versions', 'version', 'backup']) {
+  for (const action of ['publish', 'restore', 'versions', 'version', 'backup', 'verify_backup']) {
     reset();
     assert.equal((await call({ action }, { tok: null })).status, 401, action + ' sem login');
     assert.equal((await call({ action }, { tok: 'ruim' })).status, 401, action + ' token inválido');
@@ -96,12 +96,55 @@ test('publicar: conteúdo idêntico e conferência desatualizada viram 409 com c
   assert.equal(status, 409); assert.equal(j.code, 'revisao_alterada'); assert.equal(j.currentRevision, 4); assert.equal(j.expectedRevision, 3);
 });
 
-test('publicar: sem a migration aplicada, cai para painel_publish v1 (compatibilidade)', async () => {
-  reset({ 'POST /rest/v1/rpc/painel_publish': okPublish });
-  const { status, j } = await call(pub());
-  assert.equal(status, 200); assert.equal(j.legacy, true);
+test('publicar (moderno): protocolo 2 sem revisão esperada é recusado com 428 e nada é gravado', async () => {
+  reset({ 'POST /rest/v1/rpc/painel_publish_v2': okPublish, 'POST /rest/v1/rpc/painel_publish': okPublish });
+  for (const extra of [{ protocol: 2 }, { protocol: 2, expectedRevision: null }, { expectedRevision: null }, { expectedRevision: undefined, protocol: 2 }]) {
+    const { status, j } = await call(pub(extra));
+    assert.equal(status, 428, JSON.stringify(extra)); assert.equal(j.code, 'revisao_esperada_ausente');
+  }
+  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc')), 'nem a v2 nem a v1 foram chamadas');
+});
+
+test('publicar (moderno): com revisão correta usa só a v2 e informa o caminho moderno', async () => {
+  reset({ 'POST /rest/v1/rpc/painel_publish_v2': okPublish });
+  const { status, j } = await call(pub({ protocol: 2, expectedRevision: 3 }));
+  assert.equal(status, 200); assert.equal(j.legacy, false); assert.equal(j.path, 'moderno'); assert.ok(!j.notice);
+  assert.ok(!calls.some((c) => c.path === '/rest/v1/rpc/painel_publish'));
+});
+
+test('publicar (moderno): v2 ausente no banco ou falha de rede NUNCA viram publicação sem conferência', async () => {
+  reset({ 'POST /rest/v1/rpc/painel_publish': okPublish }); // v2 inexistente (migration pendente)
+  let { status, j } = await call(pub({ protocol: 2, expectedRevision: 3 }));
+  assert.equal(status, 501); assert.equal(j.code, 'migracao_pendente');
+  assert.ok(!calls.some((c) => c.path === '/rest/v1/rpc/painel_publish'), 'não caiu para a v1');
+  reset({ 'POST /rest/v1/rpc/painel_publish_v2': () => { throw new TypeError('fetch failed'); }, 'POST /rest/v1/rpc/painel_publish': okPublish });
+  ({ status, j } = await call(pub({ protocol: 2, expectedRevision: 3 })));
+  assert.equal(status, 502); assert.ok(!calls.some((c) => c.path === '/rest/v1/rpc/painel_publish'), 'falha de rede não autoriza a v1');
+  reset({ 'POST /rest/v1/rpc/painel_publish_v2': [428, { code: 'PT428', message: 'revisao_esperada_ausente', details: null }] });
+  ({ status, j } = await call(pub({ protocol: 2, expectedRevision: 3 })));
+  assert.equal(status, 428); assert.equal(j.code, 'revisao_esperada_ausente');
+});
+
+test('publicar (compatibilidade): corpo do painel antigo (main) usa a v1, identificado como legado', async () => {
+  reset({ 'POST /rest/v1/rpc/painel_publish': okPublish, 'POST /rest/v1/rpc/painel_publish_v2': okPublish });
+  // exatamente o corpo que o publishData do main envia: {file, periodKey, checksum, dataJson, setCurrent}
+  const antigo = { file: D.file, periodKey: '2026-10', checksum: DCK, dataJson: DJSON, setCurrent: true };
+  const { status, j } = await call(antigo);
+  assert.equal(status, 200); assert.equal(j.ok, true); assert.equal(j.revision, 4);
+  assert.equal(j.legacy, true); assert.equal(j.path, 'compatibilidade'); assert.match(j.notice, /compatibilidade/);
   const v1 = calls.find((c) => c.path === '/rest/v1/rpc/painel_publish');
-  assert.ok(v1 && !('p_expected_revision' in v1.body), 'v1 recebe os mesmos argumentos de antes');
+  assert.deepEqual(Object.keys(v1.body).sort(), ['p_checksum', 'p_data', 'p_file_name', 'p_period_key', 'p_published_by', 'p_set_current', 'p_summary'], 'v1 recebe os mesmos argumentos de antes');
+  assert.ok(!calls.some((c) => c.path === '/rest/v1/rpc/painel_publish_v2'));
+});
+
+test('publicar (compatibilidade): pode ser desligado depois da transição (PAINEL_LEGACY_PUBLISH=off)', async () => {
+  reset({ 'POST /rest/v1/rpc/painel_publish': okPublish, 'POST /rest/v1/rpc/painel_publish_v2': okPublish });
+  const r = await handle(req(pub()), env({ ...ENV, PAINEL_LEGACY_PUBLISH: 'off' }));
+  const j = await r.json(); assert.equal(r.status, 426); assert.equal(j.code, 'cliente_desatualizado');
+  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc')));
+  const r2 = await handle(req(pub({ protocol: 2, expectedRevision: 3 })), env({ ...ENV, PAINEL_LEGACY_PUBLISH: 'off' }));
+  assert.equal(r2.status, 200, 'o fluxo moderno continua funcionando');
+  assert.equal((await call(pub({ protocol: 3, expectedRevision: 3 }))).status, 400, 'protocolo desconhecido recusado');
 });
 
 test('publicar: validações preservadas (checksum, período, revisão esperada)', async () => {
@@ -115,7 +158,10 @@ test('publicar: validações preservadas (checksum, período, revisão esperada)
 
 test('recuperar: exige revisão vigente conferida e mapeia os erros', async () => {
   reset();
-  assert.equal((await call({ action: 'restore', periodKey: '2026-10', revision: 2 })).status, 422);
+  assert.equal((await call({ action: 'restore', periodKey: '2026-10', revision: 2 })).status, 428, 'sem revisão esperada');
+  assert.equal((await call({ action: 'restore', periodKey: '2026-10', revision: 2, expectedRevision: null, protocol: 2 })).status, 428, 'revisão esperada nula');
+  assert.equal((await call({ action: 'restore', periodKey: '2026-10', revision: 2, expectedRevision: 'x' })).status, 422);
+  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc')), 'recuperação sem conferência não chama o banco');
   assert.equal((await call({ action: 'restore', periodKey: '2026-10', revision: 0, expectedRevision: 3 })).status, 422);
   reset({ 'POST /rest/v1/rpc/painel_restore_version': () => J(200, { period_key: '2026-10', revision: 5, previous_revision: 4, restored_from_revision: 2, checksum: 'abc', file_name: 'f.xlsx', published_at: 't', current_set: false, action: 'restore' }) });
   let { status, j } = await call({ action: 'restore', periodKey: '2026-10', revision: 2, expectedRevision: 4, setCurrent: false });
@@ -164,6 +210,57 @@ test('versão e backup: dados completos só para publicadores', async () => {
   });
   const b = await call({ action: 'backup' });
   assert.equal(b.status, 200); assert.equal(b.j.versions.length, 1); assert.equal(b.j.exportedBy, 'pub@heiway.net');
+});
+
+const SEGREDO = 'segredo-de-teste-com-mais-de-32-caracteres!!';
+const rotasBackup = () => ({
+  'GET /rest/v1/painel_month_versions': () => J(200, [
+    { period_key: '2026-10', revision: 3, checksum: DCK, data: D },
+    { period_key: '2026-10', revision: 4, checksum: 'outro', data: { ...D, ftrGeral: 0.5 } }]),
+  'GET /rest/v1/painel_months': () => J(200, [{ period_key: '2026-10', revision: 4 }]),
+  'GET /rest/v1/painel_publications': () => J(200, [{ id: 1 }]),
+  'GET /rest/v1/painel_current': () => J(200, [{ period_key: '2026-10' }]),
+});
+const sha = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((x) => x.toString(16).padStart(2, '0')).join('');
+const callEnv = async (body, e) => { const r = await handle(req(body), env(e)); const txt = await r.text(); assert.ok(!txt.includes('sb_secret') && !txt.includes(SEGREDO), 'nenhum segredo na resposta'); return { status: r.status, j: JSON.parse(txt) }; };
+
+test('backup sem segredo configurado: sha256 por versão e SEM assinatura (autenticidade não comprovada)', async () => {
+  reset(rotasBackup());
+  const { status, j } = await callEnv({ action: 'backup' }, ENV);
+  assert.equal(status, 200); assert.equal(j.auth, null);
+  assert.equal(j.versions[0].sha256, await sha(JSON.stringify(D))); assert.ok(!('sig' in j.versions[0]));
+  const curto = await callEnv({ action: 'backup' }, { ...ENV, PAINEL_BACKUP_HMAC_KEY: 'curto' });
+  assert.equal(curto.j.auth, null, 'segredo curto demais é ignorado');
+  const v = await callEnv({ action: 'verify_backup', versions: [{ key: '2026-10', revision: 3, checksum: DCK, sha256: j.versions[0].sha256 }] }, ENV);
+  assert.equal(v.status, 200); assert.equal(v.j.configured, false);
+});
+
+test('backup assinado (HMAC-SHA256): conferência no servidor detecta adulteração e versões removidas', async () => {
+  const E = { ...ENV, PAINEL_BACKUP_HMAC_KEY: SEGREDO, PAINEL_BACKUP_HMAC_KEY_ID: 'k2026' };
+  reset(rotasBackup());
+  const b = (await callEnv({ action: 'backup' }, E)).j;
+  assert.deepEqual([b.auth.alg, b.auth.keyId, b.auth.scheme], ['HMAC-SHA256', 'k2026', 'ftr-painel-backup-v1']);
+  assert.ok(b.versions.every((v) => /^[0-9a-f]{64}$/.test(v.sig) && /^[0-9a-f]{64}$/.test(v.sha256)));
+  const ids = (vs) => vs.map((v) => ({ key: v.period_key, revision: v.revision, checksum: v.checksum, sha256: v.sha256, sig: v.sig }));
+  const ver = (vs, extra = {}) => callEnv({ action: 'verify_backup', auth: b.auth, exportedAt: b.exportedAt, exportedBy: b.exportedBy, versions: vs, ...extra }, E);
+  let r = await ver(ids(b.versions));
+  assert.equal(r.j.manifestValid, true); assert.ok(r.j.versions.every((x) => x.valid), 'backup original autêntico');
+  // dados alterados e sha256 recalculado pelo adulterador: a assinatura não confere
+  const adult = ids(b.versions); adult[1].sha256 = await sha(JSON.stringify({ ...D, ftrGeral: 0.99 }));
+  r = await ver(adult);
+  assert.deepEqual(r.j.versions.map((x) => x.valid), [true, false]); assert.equal(r.j.manifestValid, false);
+  // versão removida do arquivo: cada assinatura restante confere, mas a lista (manifesto) não
+  r = await ver(ids(b.versions).slice(0, 1));
+  assert.equal(r.j.versions[0].valid, true); assert.equal(r.j.manifestValid, false);
+  // exportedBy trocado no arquivo
+  r = await ver(ids(b.versions), { exportedBy: 'outra@pessoa' }); assert.equal(r.j.manifestValid, false);
+  // assinatura de outra chave
+  r = await ver(ids(b.versions), { auth: { ...b.auth, keyId: 'k-velha' } }); assert.equal(r.j.keyKnown, false);
+  // arquivo sem assinatura
+  r = await ver(ids(b.versions), { auth: null }); assert.equal(r.j.signed, false);
+  // identificação inválida é recusada; nada é gravado em nenhum caso
+  assert.equal((await ver([{ key: '2026-10', revision: 3, checksum: DCK, sha256: 'xyz' }])).status, 422);
+  assert.ok(!calls.some((c) => c.path.startsWith('/rest/v1/rpc') || (c.method !== 'GET' && c.path.startsWith('/rest/v1/'))));
 });
 
 test('ação desconhecida e corpo inválido', async () => {

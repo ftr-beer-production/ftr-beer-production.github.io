@@ -1,16 +1,23 @@
 -- =====================================================================
--- Painel FTR · ROLLBACK da Migration 001 (histórico de versões)
+-- Painel FTR · ROLLBACK da Migration 20261109120000 (histórico de versões)
+-- Fica FORA de supabase/migrations de propósito: nunca deve ser aplicado por
+-- "db push". Executar manualmente, só com autorização.
 -- ---------------------------------------------------------------------
 -- Volta o esquema ao estado anterior SEM perder dados:
 --   * o histórico capturado (painel_month_versions) NÃO é apagado: a tabela é
 --     renomeada para painel_month_versions_rollback_AAAAMMDDHH24MISS e
---     continua privada (RLS ligado, sem permissões para anon/authenticated);
+--     continua privada (RLS ligado, sem permissões para anon/authenticated;
+--     service_role passa a ter só leitura: o arquivo não pode ser alterado pela API);
 --   * remove gatilhos e as funções novas;
---   * remove as colunas action/restored_from_revision de painel_publications
+--   * remove as colunas action/restored_from_revision/via de painel_publications
 --     (a informação continua na tabela renomeada).
 --
--- ANTES de executar: volte a Edge Function para a versão anterior (ou mantenha
--- a nova: ela cai automaticamente para painel_publish v1 quando a v2 não existe).
+-- ROLLBACK NÃO APAGA o histórico novo: desativa as funcionalidades novas e
+-- arquiva os dados. Reaplicar a migration depois cria um histórico novo (só com
+-- a versão vigente de cada mês); o arquivo pode ser consultado ou reincorporado
+-- manualmente (ver documentacao/MELHORIAS.md).
+-- ANTES de executar: volte a Edge Function e o painel para a versão do main.
+-- (A Edge nova, sem a migration, só atende o painel antigo pelo caminho v1.)
 -- painel_months, painel_current, painel_publish (v1) e painel_publicadores
 -- não são tocados. Nenhum objeto do CIP é tocado.
 -- =====================================================================
@@ -41,7 +48,8 @@ begin
       execute format('alter sequence %s rename to %I', v_seq, 'painel_month_versions_id_seq_rb_' || v_sfx);
     end if;
     execute format('alter table public.painel_month_versions rename to %I', v_name);
-    execute format('revoke all on public.%I from public, anon, authenticated', v_name);
+    execute format('revoke all on public.%I from public, anon, authenticated, service_role', v_name);
+    execute format('grant select on public.%I to service_role', v_name);
     raise notice 'histórico preservado em public.%', v_name;
   end if;
 end $$;
@@ -53,6 +61,8 @@ drop function if exists public.painel_block_change();
 
 alter table public.painel_publications drop constraint if exists painel_publications_restore_chk;
 alter table public.painel_publications drop constraint if exists painel_publications_action_chk;
+alter table public.painel_publications drop constraint if exists painel_publications_via_chk;
+alter table public.painel_publications drop column if exists via;
 alter table public.painel_publications drop column if exists restored_from_revision;
 alter table public.painel_publications drop column if exists action;
 

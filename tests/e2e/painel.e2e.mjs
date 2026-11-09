@@ -1,7 +1,8 @@
 // Teste de PONTA A PONTA, 100% local e isolado (nunca toca a produção):
 //   navegador (Chromium/Playwright) → painel docs/index.html → Edge Function REAL (index.ts) →
-//   API REST simulada (tradução mínima para SQL) → PostgreSQL LOCAL com o esquema atual + migration 001.
+//   API REST simulada (tradução mínima para SQL) → PostgreSQL LOCAL com o esquema atual + migration 20261109120000.
 // A biblioteca SheetJS é substituída por um "shim" mínimo que entrega a planilha sintética (o CDN não é acessível aqui).
+// Inclui o painel ATUAL de produção (main) publicando pela Edge nova (janela de transição).
 // Uso: node --experimental-strip-types --no-warnings tests/e2e/painel.e2e.mjs
 import { createRequire } from 'node:module';
 const { chromium } = createRequire(import.meta.url)('playwright'); // instalação global do Playwright
@@ -11,6 +12,7 @@ import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { planilha } from '../fixtures/planilha.mjs';
 
@@ -47,7 +49,7 @@ q1(`grant all on public.painel_months, public.painel_current, public.painel_publ
 // setembro e outubro publicados com a função ANTIGA (v1), antes da migration — como em produção
 const sept = { ...REAL, period: { m: 8, y: 2026 }, file: '09. Setembro 26.xlsx' };
 for (const [k, d] of [['2026-09', sept], ['2026-10', REAL]]) q1(`select painel_publish(${lit(k)}, ${lit(d.file)}, ${lit(fnv(JSON.stringify(d)))}, ${lit(d)}, NULL, 'pub@teste.local', true)`);
-sqlFile(join(RAIZ, 'supabase/migrations/20261106_001_painel_versoes.sql'));
+sqlFile(join(RAIZ, 'supabase/migrations/20261109120000_painel_versoes.sql'));
 ok(q1(`select count(*) from painel_month_versions where action='backfill'`) === '2', 'migration aplicada sobre dados publicados pela v1 (2 versões copiadas)');
 
 // ---------------------------------------------------------------- API REST simulada (mínimo usado pelo painel e pela função)
@@ -93,11 +95,16 @@ globalThis.fetch = async (u, o = {}) => { const url = new URL(u); if (url.host !
   return new Response(body, { status: st, headers: { 'content-type': 'application/json' } }); };
 
 // ---------------------------------------------------------------- servidor local do painel
-const srv = createServer((req, res) => { const f = req.url.split('?')[0] === '/' ? 'index.html' : null; if (!f) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(readFileSync(join(RAIZ, 'docs', f))); });
+// "/" = painel novo (branch); "/antigo" = painel ATUAL de produção (docs/index.html do main), para a janela de transição
+const HTML_ANTIGO = execFileSync('git', ['-C', RAIZ, 'show', 'main:docs/index.html']);
+const srv = createServer((req, res) => { const u = req.url.split('?')[0], body = u === '/' ? readFileSync(join(RAIZ, 'docs/index.html')) : u === '/antigo' ? HTML_ANTIGO : null;
+  if (!body) { res.writeHead(404); return res.end(); }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(body); });
 await new Promise((r) => srv.listen(0, '127.0.0.1', r));
 const ORIGEM = 'http://127.0.0.1:' + srv.address().port;
-const EDGE_ENV = { SUPABASE_URL: 'https://fake.supabase.co', SUPABASE_PUBLISHABLE_KEYS: '{"default":"sb_publishable_teste"}', SUPABASE_SECRET_KEYS: '{"default":"sb_secret_teste"}', ALLOWED_ORIGINS: ORIGEM };
+const EDGE_ENV = { SUPABASE_URL: 'https://fake.supabase.co', SUPABASE_PUBLISHABLE_KEYS: '{"default":"sb_publishable_teste"}', SUPABASE_SECRET_KEYS: '{"default":"sb_secret_teste"}', ALLOWED_ORIGINS: ORIGEM,
+  // segredo FICTÍCIO, só deste teste local: liga a assinatura HMAC dos backups
+  PAINEL_BACKUP_HMAC_KEY: 'segredo-local-de-teste-e2e-0123456789abcdef', PAINEL_BACKUP_HMAC_KEY_ID: 'e2e' };
 
 const SHIM = `window.XLSX={read(buf,o){const S=window.__WB;return{SheetNames:Object.keys(S),Sheets:Object.fromEntries(Object.keys(S).map(n=>[n,{__a:S[n]}]))}},
  utils:{sheet_to_json(ws){return ws.__a.map(r=>r.slice())},book_new(){return{SheetNames:[],Sheets:{}}},book_append_sheet(wb,ws,n){wb.SheetNames.push(n);wb.Sheets[n]=ws},
@@ -105,9 +112,11 @@ const SHIM = `window.XLSX={read(buf,o){const S=window.__WB;return{SheetNames:Obj
  write(wb){window.__LASTWB=JSON.parse(JSON.stringify(wb));return new TextEncoder().encode('xlsx-teste').buffer}};`;
 
 const browser = await chromium.launch();
+const erros = [], edgeResp = [];
+async function novaPagina() {
 const ctx = await browser.newContext({ acceptDownloads: true, locale: 'pt-BR', timezoneId: 'America/Sao_Paulo' });
 const page = await ctx.newPage();
-const erros = []; page.on('pageerror', (e) => erros.push(e.message));
+page.on('pageerror', (e) => erros.push(e.message));
 if (process.env.E2E_DEBUG) { page.on('console', (m) => console.log('[página]', m.text())); page.on('response', async (r) => { if (r.url().includes('functions/v1')) { let b = ''; try { b = (await r.text()).slice(0, 300); } catch (_) {} console.log('[resp]', r.status(), b); } }); }
 await page.route('https://cdnjs.cloudflare.com/**', (r) => r.fulfill({ contentType: 'application/javascript', body: SHIM }));
 await page.route('https://fonts.googleapis.com/**', (r) => r.fulfill({ body: '' }));
@@ -117,12 +126,14 @@ await page.route(SB + '/**', async (route) => {
   let st, body, extra = {};
   if (url.pathname === '/functions/v1/painel-publish') {
     const resp = await handle(new Request('https://fake.supabase.co/functions/v1/painel-publish', { method: rq.method(), headers: { ...h, origin: ORIGEM }, body: rq.postData() }), (k) => EDGE_ENV[k]);
-    st = resp.status; body = await resp.text(); extra = Object.fromEntries(resp.headers);
+    st = resp.status; body = await resp.text(); extra = Object.fromEntries(resp.headers); edgeResp.push({ st, body });
   } else if (url.pathname.startsWith('/auth/')) [st, body] = auth(url, h, rq.postData());
   else [st, body] = rest(rq.method(), url, h, rq.postData());
   route.fulfill({ status: st, contentType: 'application/json', body, headers: { 'access-control-allow-origin': '*', ...extra } });
 });
 await page.addInitScript((wb) => { window.__WB = wb; }, { ...planilha(), FERMENTSP: [['outra aba']] });
+return page; }
+let page = await novaPagina();
 
 const dlgTxt = () => page.locator('#dlg:not([hidden]) #db').innerText();
 const clicar = async (txt) => { await page.locator('#dlg:not([hidden]) #db button', { hasText: txt }).first().click(); };
@@ -151,6 +162,7 @@ try {
   await page.waitForFunction(() => /publicada para todos/i.test(document.getElementById('imp').innerText), null, { timeout: 15000 });
   ok(q1(`select string_agg(revision||':'||action, ',' order by revision) from painel_month_versions where period_key='2026-10'`) === '1:backfill,2:publish', 'nova revisão 2 publicada e a revisão 1 preservada com os dados completos');
   ok(q1(`select (data->>'file') from painel_month_versions where period_key='2026-10' and revision=1`) === REAL.file, 'dados da revisão 1 intactos no histórico');
+  ok(q1(`select via from painel_month_versions where period_key='2026-10' and revision=2`) === 'v2' && edgeResp.some((x) => /"revision":2/.test(x.body) && /"path":"moderno"/.test(x.body)), 'painel novo publica pelo fluxo moderno (v2, com revisão esperada)');
 
   // 3 · reimportar o mesmo arquivo: conteúdo idêntico, sem botão de publicar
   await importar(); await esperaDlg('Conferência antes de publicar');
@@ -211,11 +223,31 @@ try {
   const bkf = join(tmp, 'backup.json'); writeFileSync(bkf, JSON.stringify(bk));
   await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
   ok((await dlgTxt()).includes('Integridade e estrutura verificadas'), 'verificação do backup confirma a integridade');
+  ok(bk.auth && bk.auth.alg === 'HMAC-SHA256' && bk.versions.every((v) => v.sig && v.sha256) && !JSON.stringify(bk).includes(EDGE_ENV.PAINEL_BACKUP_HMAC_KEY), 'backup assinado pelo servidor (HMAC), sem o segredo no arquivo');
+  ok(bk.versions.every((v) => v.sha256 === createHash('sha256').update(v.dataJson).digest('hex')), 'sha256 do servidor confere com o JSON salvo pelo navegador');
+  await clicar('Conferir autenticidade no servidor'); await esperaDlg('Autêntico');
+  ok(true, 'autenticidade conferida no servidor: backup original autêntico');
   const antes = q1(`select count(*) from painel_month_versions`);
   await clicar('Fechar');
+  const original = JSON.stringify(bk);
+  // (a) edição acidental/sem recalcular: a integridade falha
   bk.versions[0].dataJson = bk.versions[0].dataJson.replace('"meta":92', '"meta":10'); writeFileSync(bkf, JSON.stringify(bk));
   await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
-  ok((await dlgTxt()).includes('verificação de integridade falhou'), 'backup adulterado é rejeitado na prévia');
+  ok((await dlgTxt()).includes('verificação de integridade falhou'), 'backup editado sem recalcular é rejeitado na prévia');
+  await clicar('Fechar');
+  // (b) adulteração DELIBERADA com recálculo de FNV e sha256: a integridade passa, a autenticidade não
+  const adult = JSON.parse(original), va = adult.versions[adult.versions.length - 1];
+  va.dataJson = va.dataJson.replace('"ftrGeral":0.95', '"ftrGeral":0.99'); va.integrity = fnv(va.dataJson); va.sha256 = createHash('sha256').update(va.dataJson).digest('hex');
+  assert.ok(va.dataJson.includes('0.99')); writeFileSync(bkf, JSON.stringify(adult));
+  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
+  ok((await dlgTxt()).includes('Integridade e estrutura verificadas'), 'adulteração com recálculo passa na verificação de integridade (limitação documentada)');
+  await clicar('Conferir autenticidade no servidor'); await esperaDlg('Assinatura inválida');
+  ok(await page.locator('#dlg #db button', { hasText: 'Republicar como nova revisão' }).count() === adult.versions.length - 1, 'adulteração deliberada detectada pela assinatura; a versão adulterada não pode ser republicada');
+  await clicar('Fechar');
+  // (c) arquivo sem assinatura: autenticidade não comprovada, dito com clareza
+  const sem = JSON.parse(original); delete sem.auth; writeFileSync(bkf, JSON.stringify(sem));
+  await page.setInputFiles('#fsbk', bkf); await esperaDlg('Verificar backup do servidor');
+  ok((await dlgTxt()).includes('Autenticidade não comprovada'), 'backup sem assinatura: a interface informa que a autenticidade não é comprovada');
   await clicar('Fechar');
   ok(q1(`select count(*) from painel_month_versions`) === antes, 'verificação não grava nada no banco');
 
@@ -225,7 +257,19 @@ try {
   await page.evaluate(() => openReport()); ok(await page.locator('#rpt:not([hidden])').count() === 1 || (await page.locator('body').innerText()).includes('Imprimir'), 'relatório PDF abre a prévia');
   await page.evaluate(() => closeReport());
   await page.evaluate(() => toggleTV()); ok(await page.evaluate(() => document.body.classList.contains('tv')), 'modo TV ativa'); await page.evaluate(() => toggleTV());
-  ok(erros.length === 0, 'nenhum erro de JavaScript na página' + (erros.length ? ': ' + erros.join(' | ') : ''));
+
+  // 10 · TRANSIÇÃO: o painel ATUAL de produção (main) publica pela Edge Function nova + migration
+  const nAntes = edgeResp.length, revAntes = +q1(`select revision from painel_months where period_key='2026-10'`);
+  page = await novaPagina();
+  await page.goto(ORIGEM + '/antigo');
+  await page.waitForFunction(() => /Publicado no servidor|Conectado/.test(document.body.innerText), null, { timeout: 15000 });
+  await importar(); await esperaDlg('Este mês já está arquivado'); await clicar('Substituir registro existente'); await login('pub@teste.local');
+  await page.waitForFunction(() => /Publicado para todos/i.test(document.getElementById('imp').innerText), null, { timeout: 15000 });
+  ok(q1(`select revision from painel_months where period_key='2026-10'`) === String(revAntes + 1), `painel antigo continua publicando durante a transição (r${revAntes + 1})`);
+  ok(q1(`select action||'|'||via||'|'||(data->>'file') from painel_month_versions where period_key='2026-10' and revision=${revAntes + 1}`) === 'publish|v1|10. Outubro 26.xlsx', 'publicação do painel antigo capturada no histórico com os dados completos, marcada como caminho de compatibilidade (v1)');
+  const ra = edgeResp.slice(nAntes).map((x) => JSON.parse(x.body)).find((j) => j.revision === revAntes + 1);
+  ok(ra && ra.legacy === true && ra.path === 'compatibilidade', 'a Edge Function informa que a operação foi feita pelo caminho legado');
+  ok(erros.length === 0, 'nenhum erro de JavaScript nas páginas' + (erros.length ? ': ' + erros.join(' | ') : ''));
   console.log(`== TESTE DE PONTA A PONTA: ${passou} verificações passaram`);
 } catch (e) {
   console.error('FALHOU:', e.message); if (erros.length) console.error('Erros na página:', erros);

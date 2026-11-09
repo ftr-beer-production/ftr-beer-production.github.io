@@ -10,13 +10,22 @@ docs/index.html                       ← o painel (o GitHub Pages publica a pas
 supabase/functions/painel-publish/    ← Edge Function que publica os meses (Supabase)
 supabase/painel_ftr.sql               ← tabelas, RLS e função SQL painel_publish (já aplicado)
 supabase/painel_publicadores.sql      ← lista privada de quem pode publicar
-supabase/migrations/                  ← histórico de versões e restauração (com rollback)
+supabase/migrations/                  ← migration do histórico de versões (aplicação manual: projeto compartilhado com o CIP)
+supabase/rollback/                    ← rollback não destrutivo (fora de migrations/ de propósito)
 tests/                                ← testes (banco temporário, Edge, painel e ponta a ponta)
 documentacao/                         ← documentação das melhorias e auditoria (não é publicada)
 ```
 
 Testes: `bash tests/executar_todos.sh` (não acessa o Supabase de produção).
 Melhorias de versões, backup, revisão da importação e exportações: veja `documentacao/MELHORIAS.md`.
+Implantação, janela de transição com o painel antigo e rollback: `documentacao/IMPLANTACAO.md`.
+
+Pontos importantes:
+- O histórico guarda os **dados interpretados** de cada planilha, não o arquivo Excel original.
+- Integridade do backup (FNV-1a/sha256) detecta corrupção e alterações acidentais; **autenticidade** só com a
+  assinatura HMAC do servidor (segredo `PAINEL_BACKUP_HMAC_KEY`, ainda não configurado).
+- Rollback não apaga o histórico: desativa as funções novas e arquiva os dados.
+- Não use `supabase db push` deste repositório: o histórico de migrations remoto é compartilhado com o CIP.
 
 ## Como funciona
 
@@ -24,7 +33,8 @@ Melhorias de versões, backup, revisão da importação e exportações: veja `d
   com a chave pública; o RLS só permite leitura dessas duas tabelas.
 - **Publicação (só autorizados):** o painel envia o mês para a Edge Function `painel-publish`,
   que confere o login, consulta a tabela privada `painel_publicadores`, valida os dados
-  (checksum, abas, período, lotes) e grava tudo de uma vez pela função SQL `painel_publish`.
+  (checksum, abas, período, lotes) e grava tudo de uma vez. O painel novo usa `painel_publish_v2`, com a
+  revisão conferida obrigatória; o painel antigo usa `painel_publish` (caminho de compatibilidade da transição).
   A chave secreta nunca sai do Supabase.
 - A Edge Function só aceita chamadas dos endereços autorizados no código dela
   (`DEFAULT_ORIGINS`).
